@@ -1,0 +1,68 @@
+    "elevated date-night shine for tops": {
+        "fit": "Body hugging",
+        "fabric": ["Satin", "Velvet", "Silk"]
+    },
+
+    "comfy lounge tees": {
+        "fit": "relaxed",
+        "sleeve_length": "Short sleeves"
+    },
+
+    "office-ready polish shirts": {
+        "fabric": "Cotton poplin",
+        "neckline": "Collar"
+    },
+
+    "flowy dresses for garden-party": {
+        "fit": "Relaxed",
+        "fabric": ["Chiffon", "Linen"],
+        "sleeve_length": "Short flutter sleeves",
+        "color_or_print": "Pastel floral",
+        "occasion": "Party",
+    },
+
+    "elevated evening glam dresses": {
+        "fit": "Body hugging",
+        "fabric": ["Satin", "Silk"],
+        "sleeve_length": "Sleeveless",
+        "color_or_print": "Sapphire blue",
+        "occasion": "Party",
+        "length": ["Midi", "Mini", "Short"],
+    },
+
+    "beachy vacay dress": {
+        "fit": "Relaxed",
+        "fabric": "Linen",
+        "sleeve_length": "Spaghetti straps",
+        "color_or_print": "Seafoam green",
+        "occasion": "Vacation"
+     
+    },
+
+    "dresses for retro 70s look": {
+        "fit": "Body hugging",
+        "fabric": "Stretch crepe",
+        "sleeve_length": "Cap sleeves",
+        "color_or_print": "Geometric print",
+    }
+
+    "pastel": {"color_or_print": ["pastel pink", "pastel yellow"]}
+    "floral": {"color_or_print": "floral print"}
+    "bold": {"color_or_print": ["ruby red", "cobalt blue"]}
+    "neutral": {"color_or_print": ["sand beige", "off-white", "white"]}
+
+    "flowy": {"fit": "relaxed"}
+    "bodycon": {"fit": "body hugging"}
+
+    "breathable / summer": {"fabric": "linen"}
+    "luxurious / party": {"fabric": "velvet"}
+    "metallic / party": {"fabric": "lamé"}
+
+    "sleek":  {"fit": "Slim"},
+    "retro '70's flare vibe":  {"fit": "Sleek and straight", "type": "Flared"}
+
+    "gym tshirts" / "workout top": {
+        "category": ["T-shirt", "Top"],
+        "fabric": ["Cotton", "Polyester blend", "Performance fabric"],
+        "fit": ["relaxed", "Regular"]
+    }

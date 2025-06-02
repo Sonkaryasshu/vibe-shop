@@ -1,0 +1,71 @@
+id,name,category,available_sizes,fit,fabric,sleeve_length,color_or_print,occasion,neckline,length,pant_type,price
+T001,Sun-Dapple Flutter Blouse,top,"XS,S,M,L,XL",Relaxed,Linen,Short Flutter Sleeves,Pastel yellow,,,,,72
+T002,Midnight Ripple Crop,top,"XS,L,XL",Stretch to fit,Silk,Cropped,Deep blue,,,,,98
+T003,Botanical Breeze Button-Up,top,"XS,S,M,L,XL",Relaxed,Cotton,Long sleeves with button cuffs,Floral print,,,,,65
+T004,Vivid Verse Tank,top,"XS,S,M,L,XL",Body hugging,Rayon,Sleeveless,Red,,,,,48
+T005,Satin Skyline Wrap Top,top,"XS,S,M,L,XL",Tailored,Satin,Full sleeves,Off-white,,,,,110
+T006,Cloud-Soft Knit Tee,top,"XS,S,M,L,XL",Relaxed,Modal jersey,Short sleeves,Pastel pink,,,,,42
+T007,Aqua Arc Peplum,top,"S,M,L,XL",Stretch to fit,Crepe,Quarter sleeves,Aqua blue,,,,,88
+T008,Wild Meadow Square-Neck,top,"XS,S,M,L,XL",Body hugging,Cotton,Straps,Green floral,,,,,55
+T009,Urban Drift Shirt,top,"XS,S,M,L,XL",Relaxed,Tencel,Long sleeves,Charcoal,,,,,75
+T010,Radiant Ripple Halter,top,"XS,S,M,L,XL",Body hugging,Silk,Sleeveless,Pastel coral,,,,,90
+D001,Sweetheart Serenity Maxi,dress,"XS,S,M,L,XL",Flowy,Linen,Spaghetti straps,Dusty rose,Party,Sweetheart,,,140
+D002,Ripple Linen Mini,dress,"XS,S,M,L,XL",Relaxed,Linen,Sleeveless,Seafoam green,Vacation,Square neck,,,95
+D003,Midnight Mosaic Midi,dress,"XS,S,M,L,XL",Body hugging,Silk,Full sleeves,Multicolor mosaic print,Party,V neck,,,185
+D004,Meadow Flutter Wrap,dress,"XS,S,M,L,XL",Relaxed,Rayon,Short flutter sleeves,Pastel floral,Everyday,Boat neck,,,110
+D005,Storm Skyline Slip,dress,"XS,S,M,L,XL",Bodycon,Satin,Spaghetti straps,Storm grey,Evening,Square neck,,,160
+D006,Cobalt Canyon Tube Midi,dress,"XS,S,M,L,XL",Body hugging,Crepe,Tube,Cobalt blue,Party,Tubetop,,,130
+D007,Breeze Blush Balloon,dress,"XS,S,M,L,XL",Flowy,Cotton,Balloon sleeves,Blush pink,Everyday,Sweetheart,,,120
+D008,Sunbeam Tiered Halter,dress,"XS,S,M,L,XL",Flowy,Organic cotton,Halter,Sunflower yellow,Vacation,Halter,,,105
+D009,Tidal Texture Tie-Waist,dress,"XS,S,M,L,XL",Tailored,Tencel,Quarter sleeves,Aqua wave print,Work,Square neck,,,145
+D010,Galaxy Spark Midi,dress,"XS,S,M,L,XL",Body hugging,Sequined mesh,Long sleeves with button cuffs,Black iridescent,Party,V neck,,,210
+D011,Orchid Oasis Midi,dress,"XS,S,M,L,XL",Relaxed,Viscose,Bishop sleeves,Orchid purple,Vocation,Boat neck,,,128
+D012,Amber Dune Slip,dress,"XS,S,M,L,XL",Body hugging,Satin,Sleeveless,Amber gold,Evening,Cowl neck,,,175
+D013,Petal Prism Wrap Maxi,dress,"XS,S,M",Flowy,Chiffon,Short flutter sleeves,Watercolor petals,Party,Sweetheart,,,155
+D014,Metro Stripe Shirt Dress,dress,"XS,S,M,L,XL",Tailored,Cotton poplin,Long sleeves with button cuffs,Stone/black stripe,Work,Collar,,,112
+D015,Sage Whisper Tiered Mini,dress,"XS,S,M",Relaxed,Linen blend,Quarter sleeves,Sage green,Everyday,V neck,,,98
+D016,Ruby Ruffle One-Shoulder,dress,"XS,S,M,L,XL",Body hugging,Crepe,One-shoulder,Ruby red,Party,One-shoulder,,,165
+D017,Coastal Breeze Smock Maxi,dress,"XS,S,M,L,XL",Flowy,Cotton gauze,Sleeveless,Soft teal,Vacation,Square neck,,,118
+D018,Graphite Knit Polo Midi,dress,"XS,S,M,L,XL",Stretch to fit,Ribbed jersey,Short sleeves,Charcoal marled,Work,Polo collar,,,105
+D019,Lavender Lace Illusion,dress,"XS,S,M,L,XL",Tailored,Lace overlay,Cap sleeves,Lavender,Party,Illusion bateau,,,190
+D020,Desert Sunset A-Line,dress,"XS,S,M,L,XL",Relaxed,Tencel twill,Short sleeves,Ombre sunset,Everyday,Round neck,,,110
+T011,Coral Coast Camp Shirt,top,"M,L,XL",Relaxed,Chambray,Short sleeves,Coral stripe,,,,,68
+T012,Velvet Noir Mockneck,top,"XS,S,M,L,XL",Body hugging,Velvet,Cropped long sleeves,Jet black,,,,,120
+T013,Silk Whisper Poet Blouse,top,"XS,S,M,L,XL",Oversized,Silk chiffon,Bishop sleeves,Off-white,,,,,145
+T014,Olive Drape Twist Tee,top,"S,M,L,XL",Relaxed,Bamboo jersey,Cap sleeves,Olive green,,,,,54
+T015,Mustard Muse Bell-Sleeve,top,"XS,S,M,L,XL",Tailored,Linen blend,Bell sleeves,Mustard yellow,,,,,88
+T016,Silver Sheen Cowl Cami,top,"XS,S,M,L,XL",Stretch to fit,Satin,Sleeveless,Silver metallic,,,,,75
+T017,Teal Tide Abstract Wrap,top,"XS,S,M,L,XL",Tailored,Crepe,Quarter sleeves,Teal abstract print,,,,,102
+T018,Lavender Haze Ribbed Henley,top,"XS,S,M,L",Stretch to fit,Ribbed knit,Long sleeves with button cuffs,Lavender haze,,,,,62
+T019,Taupe Tweed Crop Jacket,top,"XS,S,M,L,XL",Tailored,Tweed,Cropped long sleeves,Warm taupe,,,,,135
+T020,Midnight Dot Peplum,top,"XS,S,M,L,XL",Body hugging,Organza overlay,Short puff sleeves,Black polka dot,,,,,98
+S001,Midnight Sequin Pencil,skirt,"XS,S,M,L,XL",,Sequined velvet,,Midnight navy sequin,,,Mini,,165
+S002,Sunlit Linen Wrap,skirt,"XS,S,M,L,XL",,Linen,,Sunshine yellow,,,Short,,78
+S003,Graphite Pinstripe A-Line,skirt,"XS,S,M,L,XL",,Cotton-blend,,Charcoal pinstripe,,,Midi,,110
+S004,Plum Crush Velvet Bias,skirt,"XS,S,M,L",,Crushed velvet,,Plum purple,,,Midi,,125
+S005,Cascade Pleat Tulle,skirt,"XS,S,M,L,XL",,Tulle,,Blush pink,,,Midi,,95
+S006,Indigo Raw-Hem Denim,skirt,"XS,S,M,L,XL",,Denim,,Mid-wash indigo,,,Short,,72
+S007,Emerald Satin Slip,skirt,"XS,S,M,L,XL",,Satin,,Emerald green,,,Midi,,118
+S008,Mustard Check Box-Pleat,skirt,"XS,S,M,L,XL",,Wool-blend,,Mustard windowpane check,,,Mini,,105
+S009,Cobalt Scuba Flounce,skirt,"XS,S,M,L",,Scuba knit,,Cobalt blue,,,Short,,88
+S010,Sand Dune Linen-Blend Maxi,skirt,"XS,S,M,L,XL",,Linen-blend,,Sand beige,,,Maxi,,120
+S011,Ruby Ripple Ruffle,skirt,"XS,S,M,L,XL",,Polyester georgette,,Ruby red micro–dot,,,Short,,78
+S012,Terracotta Cargo Midi,skirt,"XS,S,M",,Cotton twill,,Terracotta,,,Midi,,82
+S013,Quartz Knit Column,skirt,"XS,S,M,L,XL",,Ribbed jersey,,Heather quartz,,,Midi,,65
+S014,Goldenrod Knife-Pleat,skirt,"XS,S,M,L,XL",,Poly-crepe,,Goldenrod yellow,,,Midi,,99
+S015,Tidal Wave Denim Maxi,skirt,"XS,S,M,L,XL",,Denim,,Deep-wash indigo,,,Maxi,,115
+S016,Sapphire Satin Godet,skirt,"XS,M,L,XL",,Satin,,Sapphire blue,,,Midi,,125
+S017,Peony Print Wrap,skirt,"XS,S,M,L,XL",,Viscose voile,,Peony watercolor print,,,Short,,74
+S018,Slate Vegan-Leather Pencil,skirt,"XS,S,M,L,XL",,Vegan leather,,Slate grey,,,Mini,,138
+S019,Emerald Grid Box-Pleat,skirt,"XS,S,M,L,XL",,Wool-blend,,Emerald green grid check,,,Midi,,112
+S020,Bronze Lamé Party Flare,skirt,"XS,S,M,XL",,Lamé,,Bronze metallic,,,Short,,145
+P001,Ocean Haze Wide-Leg, pants,"XS,S",Relaxed,Linen-blend,,Seafoam green,,,,Wide-legged,92
+P002,Midnight Sleek Cigarette, pants,"XS,S,M,L,XL",Slim,Polyester twill,,Midnight navy,,,,Ankle length,110
+P003,Retro Flare Denim, pants,"XS,S,M,L,XL",Slim,Denim,,Classic indigo,,,,Flared,99
+P004,Velvet Noir Palazzo, pants,"XS,S,M,L,XL",Relaxed,Velvet,,Jet black,,,,Wide hem,135
+P005,Stone Stretch Straight Ankle, pants,"XS,S,M",Sleek and straight,Cotton-blend,,Stone beige,,,,Straight ankle,88
+P006,Sandbar Linen Culotte, pants,"XS,S,M,L,XL",Relaxed,Linen,,Sand taupe,,,,Wide-legged,98
+P007,Graphite Tailor Mid-Rise, pants,"XS,S,M,L,XL",Sleek and straight,Wool-blend,,Graphite grey,,,,Mid-rise,128
+P008,Emerald Breeze Low-Rise, pants,"M,L,XL",Slim,Tencel-blend,,Emerald green,,,,Low-rise,105
+P009,Indigo Sculpt Skinny, pants,"XS,S,M,L,XL",Slim,Stretch denim,,Deep indigo,,,,Ankle length,92
+P010,Platinum Utility Cargo, pants,"XS,S,M,L",Relaxed,Cotton twill,,Platinum grey,,,,Wide hem,115
