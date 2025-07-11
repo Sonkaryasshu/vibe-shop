@@ -3,7 +3,8 @@ import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import chromadb
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import uuid
 import json
 import time
@@ -41,7 +42,9 @@ class ProductService:
         self.collection = None
         self.product_ids_list = []
         self.product_descriptions = []
-        self.gemini_model = None
+        self.gemini_client = None
+        self.gemini_pro_model = None
+        self.gemini_flash_model = None
         self.MAX_FOLLOW_UP_QUESTIONS = 2
         self.valid_attribute_values = {}
 
@@ -55,15 +58,16 @@ class ProductService:
         try:
             google_api_key = os.getenv("GOOGLE_API_KEY")
             if google_api_key:
-                gemini_model_name = os.getenv("GEMINI_MODEL_NAME_VIBE", "gemini-2.5-pro-preview-05-06")
-                genai.configure(api_key=google_api_key)
-                self.gemini_model = genai.GenerativeModel(gemini_model_name)
-                print(f"Successfully configured Gemini API and loaded {gemini_model_name} model.")
+                self.gemini_client = genai.Client(api_key=google_api_key)
+                self.gemini_pro_model = os.getenv("GEMINI_PRO_MODEL_NAME", "gemini-2.5-pro")
+                self.gemini_flash_model = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-2.5-flash")
+                print(f"Successfully configured Gemini API with Pro model: {self.gemini_pro_model} and Flash model: {self.gemini_flash_model}")
             else:
                 print("Warning: GOOGLE_API_KEY environment variable not found. Gemini LLM features will be disabled.")
+                self.gemini_client = None
         except Exception as e:
-            print(f"Error configuring Gemini API or loading model: {e}")
-            self.gemini_model = None
+            print(f"Error configuring Gemini API: {e}")
+            self.gemini_client = None
         
         try:
             self.chroma_client = chromadb.Client()
@@ -134,8 +138,8 @@ class ProductService:
                 self.valid_attribute_values = {}
 
     def _assess_shopping_intent(self, user_input: str) -> dict:
-        if not self.gemini_model:
-            print("Gemini model not available for assessing shopping intent. Defaulting to has_shopping_intent: True.")
+        if not self.gemini_client:
+            print("Gemini client not available for assessing shopping intent. Defaulting to has_shopping_intent: True.")
             return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None}
         if not user_input:
             print("Empty input for shopping intent assessment. Defaulting to has_shopping_intent: False.")
@@ -146,31 +150,47 @@ class ProductService:
         User's input: "{user_input}"
 
         Analyze this input.
-        - If the input clearly indicates an interest in finding or discussing apparel (e.g., "looking for a dress", "summer clothes", "need a brown shirt", "what about something for a party?"), then the user has shopping intent.
-        - If the input is a general greeting (e.g., "hi", "hello"), a question about you (e.g., "who are you?", "who built this?"), a nonsensical statement, or clearly unrelated to shopping for clothes, then the user does not have clear shopping intent.
+        - If the input indicates interest in shopping, browsing, or learning about apparel options (e.g., "looking for a dress", "summer clothes", "what do you have?", "tell me options", "show me products", "what categories", "effortless but polished", style descriptions), then the user has shopping intent.
+        - If the input is clearly unrelated to shopping for clothes (e.g., "what's the weather?", "who made you?", "how do I cook pasta?"), then the user does not have shopping intent.
+        - When in doubt, assume the user has shopping intent.
 
         Output ONLY a JSON object with two keys:
         1. "has_shopping_intent": boolean (true if shopping intent is present, false otherwise).
-        2. "suggested_reply_if_no_intent": string (If `has_shopping_intent` is false, provide a polite and helpful reply to guide the user towards stating their shopping needs. This reply will be shown to the user. Examples: "Hello! How can I help you find some apparel today?", "I can help you find clothing. What are you looking for?", "I'm here to assist with your apparel search. What kind of items are you interested in?". If `has_shopping_intent` is true, this should be null).
+        2. "suggested_reply_if_no_intent": string (If `has_shopping_intent` is false, provide a polite and helpful reply to guide the user towards stating their shopping needs. If `has_shopping_intent` is true, this should be null).
 
         Example for "looking for a summer dress":
         {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
 
-        Example for "hi":
-        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "Hello! What kind of vibe or apparel are you looking for today?"}}
+        Example for "what do you have?":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
 
-        Example for "who made you?":
+        Example for "tell me options":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+
+        Example for "effortless but polished":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+
+        Example for "what's the weather today?":
         {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm a shopping assistant. Are you looking for any clothing items?"}}
 
         JSON:
         """
         try:
             start_time = time.time()
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_flash_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0  # No thinking needed for simple intent detection
+                    ),
+                    response_mime_type="application/json"
+                )
+            )
             end_time = time.time()
-            print(f"Gemini call to _assess_shopping_intent took {end_time - start_time:.2f} seconds.")
+            print(f"Gemini Flash call to _assess_shopping_intent took {end_time - start_time:.2f} seconds.")
             
-            assessment_result = _parse_llm_json_output(response.text)
+            assessment_result = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
             if isinstance(assessment_result, dict) and "has_shopping_intent" in assessment_result:
                 return {
                     "has_shopping_intent": assessment_result.get("has_shopping_intent", False),
@@ -184,8 +204,8 @@ class ProductService:
             return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None}
 
     def _infer_attributes_from_vibe(self, vibe_description: str) -> dict:
-        if not self.gemini_model:
-            print("Gemini model not available for inferring attributes from vibe.")
+        if not self.gemini_client:
+            print("Gemini client not available for inferring attributes from vibe.")
             return {}
 
         prompt = f"""
@@ -219,10 +239,19 @@ class ProductService:
         """
         try:
             start_time = time.time()
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_flash_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=512  # Flash with moderate thinking for attribute inference
+                    ),
+                    response_mime_type="application/json"
+                )
+            )
             end_time = time.time()
-            print(f"Gemini call to _infer_attributes_from_vibe took {end_time - start_time:.2f} seconds.")
-            inferred_attributes = _parse_llm_json_output(response.text)
+            print(f"Gemini Flash call to _infer_attributes_from_vibe took {end_time - start_time:.2f} seconds.")
+            inferred_attributes = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
 
             if inferred_attributes and self.valid_attribute_values:
                 validated_attributes = {}
@@ -250,8 +279,8 @@ class ProductService:
             return {}
 
     def _parse_user_answer_and_update_filters(self, last_question_text: str, user_answer: str, current_filters: dict) -> dict:
-        if not self.gemini_model:
-            print("Gemini model not available for parsing user answer.")
+        if not self.gemini_client:
+            print("Gemini client not available for parsing user answer.")
             return current_filters
 
         filters_for_prompt = {k: v for k, v in current_filters.items() if k != "vibe_inferred"}
@@ -259,6 +288,7 @@ class ProductService:
         prompt = f"""
         You are a helpful assistant processing a user's preferences for apparel.
         Current known preferences: {json.dumps(filters_for_prompt)}
+        Valid attribute values: {json.dumps(self.valid_attribute_values)}
         The user was asked: "{last_question_text}"
         The user replied: "{user_answer}"
 
@@ -269,6 +299,7 @@ class ProductService:
         - If the user's reply indicates a preference for an attribute (that was part of the question) should be cleared or reset (e.g., they say "any size is fine" or "no budget limit"), output that attribute with a `null` value (e.g., {{"size": null}}).
         - Only include attributes directly addressed or modified by the user's current reply. Do not include unchanged attributes from 'Current known preferences'.
         - If the user's answer is unclear or doesn't directly answer the question for a specific attribute, do not include that attribute in your JSON output (i.e., return an empty JSON object {{}} or only other relevant changes).
+        - If the user is asking a clarifying question instead of providing preference information, return: {{"clarification_answer": "your helpful answer to their question"}}
 
         For example:
         - If Current preferences are {{"category": "top"}} and user was asked "Budget?" and replied "under $50", your JSON output should be: {{"price_max": 50}}
@@ -276,34 +307,51 @@ class ProductService:
         - If Current preferences are {{"size": "S"}} and user was asked "Size?" and replied "Actually, any size works", your JSON output should be: {{"size": null}}
         - If the question was "Any must-haves like sleeveless, budget range or size to keep in mind?" and the user replied "Want sleeveless, keep under $100, both S and M work", your JSON output should be:
           {{"sleeve_length": "sleeveless", "price_max": 100, "size": ["S", "M"]}}
+        - If user was asked "What category?" and replied "what categories do you have?", your JSON output should be: {{"clarification_answer": "I have these categories available: dress, top, pants, skirt. Which one interests you for your effortless but polished look?"}}
         
         Ensure attribute keys in your JSON output are standard (e.g., price_min, price_max, category, size, fit, fabric, color_or_print, occasion, sleeve_length, length, pant_type).
         JSON:
         """
         try:
             start_time = time.time()
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_flash_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0  # No thinking needed for simple parsing
+                    ),
+                    response_mime_type="application/json"
+                )
+            )
             end_time = time.time()
-            print(f"Gemini call to _parse_user_answer_and_update_filters took {end_time - start_time:.2f} seconds.")
+            print(f"Gemini Flash call to _parse_user_answer_and_update_filters took {end_time - start_time:.2f} seconds.")
             
-            llm_suggested_changes = _parse_llm_json_output(response.text)
-            if isinstance(llm_suggested_changes, dict) and llm_suggested_changes:
-                new_filters = current_filters.copy()
-                for key, value in llm_suggested_changes.items():
-                    if value is None:
-                        if key in new_filters:
-                            del new_filters[key]
-                    else:
-                        new_filters[key] = value
-                return new_filters
+            llm_suggested_changes = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
+            if isinstance(llm_suggested_changes, dict):
+                # Check if this is a clarification answer
+                if "clarification_answer" in llm_suggested_changes:
+                    # Return special marker for clarification
+                    return {"__clarification_answer__": llm_suggested_changes["clarification_answer"]}
+                
+                # Normal filter updates
+                if llm_suggested_changes:
+                    new_filters = current_filters.copy()
+                    for key, value in llm_suggested_changes.items():
+                        if value is None:
+                            if key in new_filters:
+                                del new_filters[key]
+                        else:
+                            new_filters[key] = value
+                    return new_filters
             return current_filters
         except Exception as e:
             print(f"Error parsing user answer with Gemini: {e}")
             return current_filters
 
     def _determine_next_follow_up(self, vibe_description: str, current_filters: dict, questions_asked_history: list) -> tuple[str | None, str | None, str | None]:
-        if not self.gemini_model:
-            print("Gemini model not available for determining follow-up.")
+        if not self.gemini_client:
+            print("Gemini client not available for determining follow-up.")
             return None, None, None
         
         if len(questions_asked_history) >= self.MAX_FOLLOW_UP_QUESTIONS:
@@ -349,10 +397,19 @@ class ProductService:
         """
         try:
             start_time = time.time()
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_flash_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0  # No thinking needed for simple follow-up logic
+                    ),
+                    response_mime_type="application/json"
+                )
+            )
             end_time = time.time()
-            print(f"Gemini call to _determine_next_follow_up took {end_time - start_time:.2f} seconds.")
-            decision = _parse_llm_json_output(response.text)
+            print(f"Gemini Flash call to _determine_next_follow_up took {end_time - start_time:.2f} seconds.")
+            decision = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
             
             if decision.get("next_question_text") is None:
                 return None, None, None
@@ -434,7 +491,7 @@ class ProductService:
         return filtered_products
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
-        if self.gemini_model:
+        if self.gemini_client:
             prompt_parts = [
                 "You are a fashion assistant. Your task is to translate a user's desired \"vibe\" into a descriptive textual query that can be used for semantic search of apparel.",
                 "Use the following examples of how vibes map to product attributes as a guide:",
@@ -452,11 +509,19 @@ class ProductService:
             prompt = "\n".join(prompt_parts)
             try:
                 start_time = time.time()
-                response = self.gemini_model.generate_content(prompt)
+                response = self.gemini_client.models.generate_content(
+                    model=self.gemini_flash_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=256  # Lighter thinking for query refinement
+                        )
+                    )
+                )
                 end_time = time.time()
-                print(f"Gemini call to _refine_query_based_on_vibe took {end_time - start_time:.2f} seconds.")
-                if response.text:
-                    llm_refined_query = response.text.strip()
+                print(f"Gemini Flash call to _refine_query_based_on_vibe took {end_time - start_time:.2f} seconds.")
+                if response.candidates[0].content.parts[0].text:
+                    llm_refined_query = response.candidates[0].content.parts[0].text.strip()
                     print(f"Gemini refined query: '{llm_refined_query}'")
                     return llm_refined_query
                 else:
@@ -523,7 +588,7 @@ class ProductService:
             print(f"Error building ChromaDB vector store: {e}")
 
     def _generate_justification(self, vibe_description: str, products: list, current_filters: dict, search_relaxed: bool = False) -> str:
-        if not self.gemini_model:
+        if not self.gemini_client:
             return "Could not generate justification as the language model is not available."
 
         if not products:
@@ -578,10 +643,18 @@ Justification:
 """
         try:
             start_time = time.time()
-            response = self.gemini_model.generate_content(prompt)
+            response = self.gemini_client.models.generate_content(
+                model=self.gemini_flash_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=512  # Flash with moderate thinking for justification
+                    )
+                )
+            )
             end_time = time.time()
-            print(f"Gemini call to _generate_justification took {end_time - start_time:.2f} seconds.")
-            return response.text.strip()
+            print(f"Gemini Flash call to _generate_justification took {end_time - start_time:.2f} seconds.")
+            return response.candidates[0].content.parts[0].text.strip()
         except Exception as e:
             print(f"Error generating justification with Gemini: {e}")
             return "We found some great products for you! Their styles and features should match your vibe."
@@ -603,26 +676,33 @@ Justification:
             "justification": None
         }
 
-        input_to_assess = ""
-        if user_response:
+        # If user is responding to a follow-up question, assume they have shopping intent
+        if user_response and last_question_text:
+            print(f"User is responding to follow-up question: '{last_question_text}'. Assuming shopping intent.")
+            has_shopping_intent = True
             input_to_assess = user_response
-        elif vibe:
-            input_to_assess = vibe
-        
-        if not input_to_assess:
-            final_response["justification"] = "Hello! How can I help you find some apparel today?"
-            final_response["products"] = []
-            return final_response
+        else:
+            # Only assess intent for initial interactions
+            input_to_assess = ""
+            if user_response:
+                input_to_assess = user_response
+            elif vibe:
+                input_to_assess = vibe
+            
+            if not input_to_assess:
+                final_response["justification"] = "Hello! How can I help you find some apparel today?"
+                final_response["products"] = []
+                return final_response
 
-        intent_assessment = self._assess_shopping_intent(input_to_assess)
-        has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
-        suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
+            intent_assessment = self._assess_shopping_intent(input_to_assess)
+            has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
+            suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
 
-        if not has_shopping_intent:
-            print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
-            final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
-            final_response["products"] = []
-            return final_response
+            if not has_shopping_intent:
+                print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
+                final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
+                final_response["products"] = []
+                return final_response
         
         print(f"Input '{input_to_assess}' has shopping intent. Proceeding with product logic.")
 
@@ -633,7 +713,15 @@ Justification:
 
         if user_response and last_question_text:
             print(f"Parsing user response: '{user_response}' to question: '{last_question_text}' with current filters: {current_filters}")
-            current_filters = self._parse_user_answer_and_update_filters(last_question_text, user_response, current_filters)
+            updated_filters = self._parse_user_answer_and_update_filters(last_question_text, user_response, current_filters)
+            
+            # Check if this is a clarification answer
+            if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
+                final_response["justification"] = updated_filters["__clarification_answer__"]
+                final_response["products"] = []
+                return final_response
+            
+            current_filters = updated_filters
             print(f"Filters after parsing answer: {current_filters}")
 
         is_first_meaningful_interaction = not questions_asked_history and \

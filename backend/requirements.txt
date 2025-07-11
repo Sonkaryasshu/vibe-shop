@@ -4,6 +4,6 @@ pandas # For handling CSV data later
 sentence-transformers # For generating embeddings
 # faiss-cpu==1.7.4 # For vector store (CPU version) # Ensure this or faiss-gpu is present
 chromadb # Using ChromaDB for vector store
-google-generativeai # For Gemini API
+google-genai # For Gemini API with thinking budget support
 numpy # For numerical operations, especially with embeddings
 # We will add more libraries like faiss-gpu if needed later
