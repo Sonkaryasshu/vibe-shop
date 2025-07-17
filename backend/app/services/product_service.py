@@ -378,19 +378,24 @@ class ProductService:
         The user was asked: "{last_question_text}"
         The user replied: "{user_answer}"
 
-        Based ONLY on the user's reply to THIS specific question, identify what attributes from the preferences should be updated, added, or removed.
+        Based on the user's reply, identify what attributes from the preferences should be updated, added, or removed.
+        
+        IMPORTANT: Extract ANY relevant attribute information from the user's response, even if it doesn't directly answer the original question. 
+        For example, if asked about "fit" but user mentions "size", extract the size information.
         
         Output ONLY a JSON object containing these changes.
-        - To add or update an attribute, include its new value (e.g., {{"price_max": 50}}, {{"size": ["S", "M"]}}).
-        - If the user's reply indicates a preference for an attribute (that was part of the question) should be cleared or reset (e.g., they say "any size is fine" or "no budget limit"), output that attribute with a `null` value (e.g., {{"size": null}}).
-        - Only include attributes directly addressed or modified by the user's current reply. Do not include unchanged attributes from 'Current known preferences'.
-        - If the user's answer is unclear or doesn't directly answer the question for a specific attribute, do not include that attribute in your JSON output (i.e., return an empty JSON object {{}} or only other relevant changes).
+        - To add or update an attribute, include its new value (e.g., {{"price_max": 50}}, {{"size": ["S"]}}).
+        - If the user's reply indicates a preference for an attribute should be cleared or reset (e.g., they say "any size is fine" or "no budget limit"), output that attribute with a `null` value (e.g., {{"size": null}}).
+        - Include ALL attributes directly addressed or modified by the user's current reply. Do not include unchanged attributes from 'Current known preferences'.
+        - If the user's answer contains no relevant attribute information, return an empty JSON object {{}}.
         - If the user is asking a clarifying question instead of providing preference information, return: {{"clarification_answer": "your helpful answer to their question"}}
 
         For example:
         - If Current preferences are {{"category": "top"}} and user was asked "Budget?" and replied "under $50", your JSON output should be: {{"price_max": 50}}
         - If Current preferences are {{"price_max": 100}} and user was asked "Size?" and replied "S or M", your JSON output should be: {{"size": ["S", "M"]}}
         - If Current preferences are {{"size": "S"}} and user was asked "Size?" and replied "Actually, any size works", your JSON output should be: {{"size": null}}
+        - If user was asked "What fit are you looking for?" and replied "i need small size only", your JSON output should be: {{"size": ["S"]}}
+        - If user was asked "What occasion?" and replied "casual wear, medium budget around $75", your JSON output should be: {{"occasion": "casual", "price_max": 75}}
         - If the question was "Any must-haves like sleeveless, budget range or size to keep in mind?" and the user replied "Want sleeveless, keep under $100, both S and M work", your JSON output should be:
           {{"sleeve_length": "sleeveless", "price_max": 100, "size": ["S", "M"]}}
         - If user was asked "What category?" and replied "what categories do you have?", your JSON output should be: {{"clarification_answer": "I have these categories available: dress, top, pants, skirt. Which one interests you for your effortless but polished look?"}}
@@ -851,6 +856,19 @@ Justification:
                 combined_vibe = f"{original_vibe} {input_to_assess}"
                 vibe = combined_vibe
                 print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{vibe}'")
+                
+                # Extract any attribute updates from related queries (like size changes)
+                print(f"Extracting attributes from related query: '{input_to_assess}'")
+                updated_filters = self._parse_user_answer_and_update_filters("", input_to_assess, current_filters)
+                
+                # Check if this is a clarification answer
+                if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
+                    final_response["justification"] = updated_filters["__clarification_answer__"]
+                    final_response["products"] = []
+                    return final_response
+                
+                current_filters = updated_filters
+                print(f"DEVLOG: Filters after extracting from related query: {current_filters}")
         else:
             # When relatedness cannot be determined (no previous context), treat as fresh query
             print("No previous context available - treating as fresh query.")
