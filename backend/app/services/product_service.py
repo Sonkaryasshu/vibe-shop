@@ -90,7 +90,7 @@ class ProductService:
                 print(f"Successfully loaded {len(self.products_df)} products from {APPAREL_DATA_PATH}")
 
                 description_cols = ['name', 'category', 'fit', 'fabric', 'sleeve_length',
-                                    'color_or_print', 'occasion', 'neckline', 'length', 'pant_type']
+                                    'color_or_print', 'occasion', 'neckline', 'length', 'pant_type', 'description']
                 for index, row in self.products_df.iterrows():
                     desc_parts = [str(row[col]) for col in description_cols if col in row and pd.notna(row[col]) and str(row[col]).strip() != '']
                     description = f"{row.get('name', '')} is a {row.get('category', '')}. "
@@ -137,13 +137,27 @@ class ProductService:
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
                 self.valid_attribute_values = {}
 
-    def _assess_shopping_intent(self, user_input: str) -> dict:
+    def _assess_shopping_intent(self, user_input: str, previous_vibe: str = None) -> dict:
         if not self.gemini_client:
             print("Gemini client not available for assessing shopping intent. Defaulting to has_shopping_intent: True.")
-            return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None}
+            return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": True}
         if not user_input:
             print("Empty input for shopping intent assessment. Defaulting to has_shopping_intent: False.")
-            return {"has_shopping_intent": False, "suggested_reply_if_no_intent": "Hello! How can I help you find some apparel today?"}
+            return {"has_shopping_intent": False, "suggested_reply_if_no_intent": "Hello! How can I help you find some apparel today?", "is_related_query": False}
+
+        relatedness_section = ""
+        if previous_vibe:
+            relatedness_section = f"""
+        
+        ADDITIONAL TASK: Assess if this new query is related to the previous shopping context or completely different.
+        Previous vibe/context: "{previous_vibe}"
+        
+        Determine if these are related or completely different:
+        - RELATED: same category with refinements (e.g., "summer dresses" → "show full sleeves only")
+        - DIFFERENT: completely different category/context (e.g., "summer dresses" → "work tops that go with pants")
+        
+        Include "is_related_query": boolean in your JSON response.
+        """
 
         prompt = f"""
         You are a helpful assistant trying to understand if a user wants to shop for apparel.
@@ -151,27 +165,38 @@ class ProductService:
 
         Analyze this input.
         - If the input indicates interest in shopping, browsing, or learning about apparel options (e.g., "looking for a dress", "summer clothes", "what do you have?", "tell me options", "show me products", "what categories", "effortless but polished", style descriptions), then the user has shopping intent.
-        - If the input is clearly unrelated to shopping for clothes (e.g., "what's the weather?", "who made you?", "how do I cook pasta?"), then the user does not have shopping intent.
+        - If the input is clearly unrelated to shopping for clothes (e.g., "what's the weather?", "who made you?", "how do I cook pasta?") OR is just a greeting (e.g., "hello", "hi", "hey"), then the user does not have shopping intent.
         - When in doubt, assume the user has shopping intent.
+        {relatedness_section}
 
-        Output ONLY a JSON object with two keys:
+        Output ONLY a JSON object with these keys:
         1. "has_shopping_intent": boolean (true if shopping intent is present, false otherwise).
         2. "suggested_reply_if_no_intent": string (If `has_shopping_intent` is false, provide a polite and helpful reply to guide the user towards stating their shopping needs. If `has_shopping_intent` is true, this should be null).
+        3. "is_related_query": boolean (true if related to previous context, false if completely different, null if no previous context).
 
         Example for "looking for a summer dress":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
 
         Example for "what do you have?":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
 
         Example for "tell me options":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
 
         Example for "effortless but polished":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null}}
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
 
         Example for "what's the weather today?":
-        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm a shopping assistant. Are you looking for any clothing items?"}}
+        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm a shopping assistant. Are you looking for any clothing items?", "is_related_query": null}}
+
+        Example for "hello":
+        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "Hello! What kind of vibe are you looking for today?", "is_related_query": null}}
+
+        Example with previous context - Previous: "summer dresses", New: "show full sleeves only":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": true}}
+
+        Example with previous context - Previous: "summer dresses", New: "work tops that go with pants":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": false}}
 
         JSON:
         """
@@ -194,14 +219,15 @@ class ProductService:
             if isinstance(assessment_result, dict) and "has_shopping_intent" in assessment_result:
                 return {
                     "has_shopping_intent": assessment_result.get("has_shopping_intent", False),
-                    "suggested_reply_if_no_intent": assessment_result.get("suggested_reply_if_no_intent")
+                    "suggested_reply_if_no_intent": assessment_result.get("suggested_reply_if_no_intent"),
+                    "is_related_query": assessment_result.get("is_related_query", None)
                 }
             else:
                 print(f"Failed to parse valid shopping intent assessment from LLM: {response.text}. Defaulting to has_shopping_intent: True.")
-                return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None}
+                return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": None}
         except Exception as e:
             print(f"Error during _assess_shopping_intent with Gemini: {e}. Defaulting to has_shopping_intent: True.")
-            return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None}
+            return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": None}
 
     def _infer_attributes_from_vibe(self, vibe_description: str) -> dict:
         if not self.gemini_client:
@@ -224,6 +250,13 @@ class ProductService:
         Infer potential product attributes (like category, fit, fabric, color_or_print, occasion, sleeve_length, length, pant_type, price_range, size).
         Focus on attributes strongly implied by the vibe and supported by the examples AND constrained by the VALID ATTRIBUTE VALUES.
         For attributes listed in VALID ATTRIBUTE VALUES, only use values from the provided lists. For 'size', you can infer common sizes like S, M, L, XL, etc. or specific plus sizes.
+        
+        IMPORTANT: Pay special attention to specific attribute requirements:
+        - If the vibe mentions "sleeveless", ensure you infer sleeve_length attribute with the exact value "Sleeveless" (match the VALID ATTRIBUTE VALUES)
+        - If the vibe mentions "no black" or "no blue", create exclusion filters using "exclude_colors" key with the colors to exclude
+        - If the vibe mentions "full sleeves" or "long sleeves", use the appropriate sleeve_length value from VALID ATTRIBUTE VALUES
+        - If the vibe mentions multiple categories like "tops and dresses", include both in the category array
+        
         For price:
         - If the vibe mentions a maximum (e.g., 'under $100', 'less than $100'), use 'price_max'.
         - If the vibe mentions a minimum (e.g., 'over $50', 'at least $50'), use 'price_min'.
@@ -234,6 +267,9 @@ class ProductService:
         {{"category": ["dress"], "fabric": ["linen", "cotton"], "occasion": "summer brunch"}}
         Another example, if vibe is "plus sized summer party under $75": {{"occasion": "party", "size": ["XL", "XXL"], "fabric": ["cotton", "linen"], "price_max": 75}}
         Another example, if vibe is "work pants between $60 and $120": {{"category": ["pants"], "occasion": "work", "price_min": 60, "price_max": 120}}
+        Another example, if vibe is "sleeveless dresses": {{"category": ["dress"], "sleeve_length": "Sleeveless"}}
+        Another example, if vibe is "work blouses, no black or blue": {{"category": ["top"], "occasion": "work", "exclude_colors": ["black", "blue"]}}
+        Another example, if vibe is "tops and dresses, only sleeveless": {{"category": ["top", "dress"], "sleeve_length": "Sleeveless"}}
         If no attributes can be confidently inferred, output an empty JSON object {{}}.
         JSON:
         """
@@ -434,7 +470,7 @@ class ProductService:
             where_conditions.append({"price": {"$gte": float(filters["price_min"])}})
         elif "price_max" in filters and filters["price_max"] is not None:
             where_conditions.append({"price": {"$lte": float(filters["price_max"])}})
-        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred"])
+        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "exclude_colors"])
 
 
         for key, value in filters.items():
@@ -478,6 +514,24 @@ class ProductService:
                         product_s_list = {s.strip().upper() for s in available_sizes_product.split(',')}
                         if any(size_filter in product_s_list for size_filter in user_s_list):
                             temp_products.append(product)
+                filtered_products = temp_products
+        
+        # Handle color exclusions with string matching
+        exclude_colors = filters.get("exclude_colors")
+        if exclude_colors:
+            exclude_colors_list = []
+            if isinstance(exclude_colors, list):
+                exclude_colors_list = [color.strip().lower() for color in exclude_colors]
+            elif isinstance(exclude_colors, str):
+                exclude_colors_list = [exclude_colors.strip().lower()]
+            
+            if exclude_colors_list:
+                temp_products = []
+                for product in filtered_products:
+                    color_or_print = product.get("color_or_print", "").lower()
+                    # Check if any excluded color appears in the color_or_print field
+                    if not any(excluded_color in color_or_print for excluded_color in exclude_colors_list):
+                        temp_products.append(product)
                 filtered_products = temp_products
         
         price_min = filters.get("price_min")
@@ -571,7 +625,8 @@ class ProductService:
                     "neckline": str(product_data.get('neckline', '')),
                     "length": str(product_data.get('length', '')),
                     "pant_type": str(product_data.get('pant_type', '')),
-                    "available_sizes": str(product_data.get('available_sizes', ''))
+                    "available_sizes": str(product_data.get('available_sizes', '')),
+                    "description": str(product_data.get('description', ''))
                 }
                 metadatas.append(meta)
             
@@ -635,9 +690,12 @@ Based on this, we have recommended the following products:
 {product_details_string}
 --- RECOMMENDED PRODUCTS END ---
 
-Please provide a brief, engaging justification (1-3 sentences) explaining to the user why these products are a good match for their stated vibe AND specific preferences.
-Focus on how the key attributes of the products align with both the vibe and the filters.
-Example Justification Format: "Based on your '{vibe_description}' vibe and preferences for {filter_summary if filter_summary else "certain features"}, I've selected these items. They feature [key attribute 1] and [key attribute 2], making them perfect. The [specific product name or type] particularly captures the [aspect of vibe/preference] with its [specific feature]."
+Please provide a VERY brief, concise justification (1-2 sentences maximum) explaining why these products match their vibe.
+Focus on the key attributes that align with the vibe. Be conversational and direct.
+
+Example format: "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top."
+
+IMPORTANT: Keep it under 30 words. Be specific about how the products match the vibe, not generic descriptions.
 
 Justification:
 """
@@ -680,6 +738,7 @@ Justification:
         if user_response and last_question_text:
             print(f"User is responding to follow-up question: '{last_question_text}'. Assuming shopping intent.")
             has_shopping_intent = True
+            is_related_query = True  # Follow-up responses are always related
             input_to_assess = user_response
         else:
             # Only assess intent for initial interactions
@@ -694,9 +753,12 @@ Justification:
                 final_response["products"] = []
                 return final_response
 
-            intent_assessment = self._assess_shopping_intent(input_to_assess)
+            # Get previous vibe for relatedness assessment
+            previous_vibe = session_payload.get("previous_vibe")
+            intent_assessment = self._assess_shopping_intent(input_to_assess, previous_vibe)
             has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
             suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
+            is_related_query = intent_assessment.get("is_related_query", None)
 
             if not has_shopping_intent:
                 print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
@@ -705,6 +767,20 @@ Justification:
                 return final_response
         
         print(f"Input '{input_to_assess}' has shopping intent. Proceeding with product logic.")
+
+        # Handle query context management - related vs fresh queries
+        if is_related_query is not None:
+            print(f"Query relatedness assessment: {'related' if is_related_query else 'fresh'}")
+            if not is_related_query:
+                # Fresh query - reset filters and questions history
+                print("Fresh query detected - resetting context.")
+                current_filters = {}
+                questions_asked_history = []
+                # Update vibe to the new query if it's user_response
+                if user_response:
+                    vibe = user_response
+            else:
+                print("Related query detected - retaining context.")
 
         if not vibe:
             final_response["justification"] = "Original vibe description is missing, cannot proceed with targeted search."
@@ -736,14 +812,16 @@ Justification:
             print(f"Filters after vibe inference: {current_filters}")
         
         final_response["current_filters"] = dict(current_filters)
+        final_response["questions_asked_history"] = list(questions_asked_history)
 
         print(f"Proceeding to search with filters: {current_filters}")
         refined_semantic_query = self._refine_query_based_on_vibe(vibe)
         chroma_where_clause = self._build_chroma_where_clause(current_filters)
         
+        print(f"DEVLOG: ChromaDB refined_semantic_query: {refined_semantic_query}")
         print(f"DEVLOG: ChromaDB where_clause: {json.dumps(chroma_where_clause, indent=2)}")
         
-        top_k_target = 5
+        top_k_target = 8
         top_k_initial_fetch = top_k_target 
         if "size" in current_filters and current_filters["size"]:
             top_k_initial_fetch = top_k_target * 4
