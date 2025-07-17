@@ -42,7 +42,8 @@ def converse_route():
     session_id = data.get("session_id")
     is_new_session = False
     if not session_id:
-        session_id = str(uuid.uuid4())
+        # Generate session ID using ProductService
+        session_id = product_service_instance._generate_session_id()
         is_new_session = True
         current_app.logger.info(f"New session started: {session_id}")
     
@@ -64,6 +65,7 @@ def converse_route():
         current_app.logger.info(f"Retrieved session state for {session_id}: {session_state}")
 
     service_payload = {
+        "session_id": session_id,
         "vibe_description": session_state["vibe_description"],
         "current_filters": session_state.get("current_filters", {}),
         "user_response": data.get("user_response"),

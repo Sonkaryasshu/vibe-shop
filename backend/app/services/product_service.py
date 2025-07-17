@@ -47,6 +47,9 @@ class ProductService:
         self.gemini_flash_model = None
         self.MAX_FOLLOW_UP_QUESTIONS = 2
         self.valid_attribute_values = {}
+        
+        # Backend session management
+        self.session_storage = {}  # Dictionary to store session data by session_id
 
         try:
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -87,6 +90,31 @@ class ProductService:
             if os.path.exists(APPAREL_DATA_PATH):
                 self.products_df = pd.read_csv(APPAREL_DATA_PATH)
                 self.products_df = self.products_df.fillna('')
+                
+                # Trim whitespace and special characters from string columns
+                string_cols = ['category', 'fit', 'fabric', 'sleeve_length', 'color_or_print', 
+                              'occasion', 'neckline', 'length', 'pant_type', 'name', 'description']
+                for col in string_cols:
+                    if col in self.products_df.columns:
+                        # Remove leading/trailing whitespace, NBSP, and other special whitespace chars
+                        self.products_df[col] = (self.products_df[col].astype(str)
+                                               .str.replace('\u00A0', ' ', regex=False)  # NBSP to regular space
+                                               .str.replace('\u2000', ' ', regex=False)  # EN quad
+                                               .str.replace('\u2001', ' ', regex=False)  # EM quad
+                                               .str.replace('\u2002', ' ', regex=False)  # EN space
+                                               .str.replace('\u2003', ' ', regex=False)  # EM space
+                                               .str.replace('\u2004', ' ', regex=False)  # 3-per-EM space
+                                               .str.replace('\u2005', ' ', regex=False)  # 4-per-EM space
+                                               .str.replace('\u2006', ' ', regex=False)  # 6-per-EM space
+                                               .str.replace('\u2007', ' ', regex=False)  # Figure space
+                                               .str.replace('\u2008', ' ', regex=False)  # Punctuation space
+                                               .str.replace('\u2009', ' ', regex=False)  # Thin space
+                                               .str.replace('\u200A', ' ', regex=False)  # Hair space
+                                               .str.replace('\u200B', '', regex=False)   # Zero-width space
+                                               .str.replace('\u200C', '', regex=False)   # Zero-width non-joiner
+                                               .str.replace('\u200D', '', regex=False)   # Zero-width joiner
+                                               .str.replace('\uFEFF', '', regex=False)   # Zero-width no-break space (BOM)
+                                               .str.strip())
                 print(f"Successfully loaded {len(self.products_df)} products from {APPAREL_DATA_PATH}")
 
                 description_cols = ['name', 'category', 'fit', 'fabric', 'sleeve_length',
@@ -136,6 +164,28 @@ class ProductService:
                 self.vibe_examples_text_content = ""
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
                 self.valid_attribute_values = {}
+
+    def _get_session_data(self, session_id: str) -> dict:
+        """Get session data for a given session ID"""
+        if session_id not in self.session_storage:
+            self.session_storage[session_id] = {
+                "previous_vibe": None,
+                "conversation_history": []
+            }
+        return self.session_storage[session_id]
+    
+    def _update_session_data(self, session_id: str, vibe: str, input_text: str):
+        """Update session data with new vibe and input"""
+        session_data = self._get_session_data(session_id)
+        session_data["previous_vibe"] = vibe
+        session_data["conversation_history"].append(input_text)
+        # Keep only last 10 interactions to avoid memory bloat
+        if len(session_data["conversation_history"]) > 10:
+            session_data["conversation_history"] = session_data["conversation_history"][-10:]
+    
+    def _generate_session_id(self) -> str:
+        """Generate a unique session ID"""
+        return f"session_{uuid.uuid4().hex[:12]}"
 
     def _assess_shopping_intent(self, user_input: str, previous_vibe: str = None) -> dict:
         if not self.gemini_client:
@@ -718,13 +768,19 @@ Justification:
             return "We found some great products for you! Their styles and features should match your vibe."
 
     def converse(self, session_payload: dict) -> dict:
+        session_id = session_payload.get("session_id", "default_session")
         vibe = session_payload.get("vibe_description")
         current_filters = session_payload.get("current_filters", {})
         user_response = session_payload.get("user_response")
         last_question_text = session_payload.get("last_question_text")
         questions_asked_history = session_payload.get("questions_asked_history", [])
+        
+        # Get previous vibe from backend session storage
+        session_data = self._get_session_data(session_id)
+        previous_vibe = session_data.get("previous_vibe")
 
         final_response = {
+            "session_id": session_id,
             "follow_up_question": None,
             "question_id": None,
             "question_text_for_client": None,
@@ -738,8 +794,15 @@ Justification:
         if user_response and last_question_text:
             print(f"User is responding to follow-up question: '{last_question_text}'. Assuming shopping intent.")
             has_shopping_intent = True
-            is_related_query = True  # Follow-up responses are always related
             input_to_assess = user_response
+            
+            # Check if follow-up response is related to previous context or a fresh query
+            print(f"DEVLOG: Follow-up - previous_vibe: '{previous_vibe}'")
+            print(f"DEVLOG: Follow-up - user_response: '{user_response}'")
+            
+            intent_assessment = self._assess_shopping_intent(user_response, previous_vibe)
+            print(f"DEVLOG: Follow-up LLM assessment result: {intent_assessment}")
+            is_related_query = intent_assessment.get("is_related_query", True)  # Default to related for follow-ups
         else:
             # Only assess intent for initial interactions
             input_to_assess = ""
@@ -754,8 +817,10 @@ Justification:
                 return final_response
 
             # Get previous vibe for relatedness assessment
-            previous_vibe = session_payload.get("previous_vibe")
+            print(f"DEVLOG: previous_vibe from session: '{previous_vibe}'")
+            print(f"DEVLOG: input_to_assess: '{input_to_assess}'")
             intent_assessment = self._assess_shopping_intent(input_to_assess, previous_vibe)
+            print(f"DEVLOG: LLM intent assessment result: {intent_assessment}")
             has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
             suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
             is_related_query = intent_assessment.get("is_related_query", None)
@@ -776,11 +841,23 @@ Justification:
                 print("Fresh query detected - resetting context.")
                 current_filters = {}
                 questions_asked_history = []
-                # Update vibe to the new query if it's user_response
-                if user_response:
-                    vibe = user_response
+                # Update vibe to the new query (use the current input as the new vibe)
+                vibe = input_to_assess
+                print(f"Updated vibe for fresh query: '{vibe}'")
             else:
-                print("Related query detected - retaining context.")
+                print("Related query detected - retaining context and combining vibe.")
+                # Combine old vibe with new input for related queries
+                original_vibe = vibe
+                combined_vibe = f"{original_vibe} {input_to_assess}"
+                vibe = combined_vibe
+                print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{vibe}'")
+        else:
+            # When relatedness cannot be determined (no previous context), treat as fresh query
+            print("No previous context available - treating as fresh query.")
+            current_filters = {}
+            questions_asked_history = []
+            vibe = input_to_assess
+            print(f"Updated vibe for fresh query (no previous context): '{vibe}'")
 
         if not vibe:
             final_response["justification"] = "Original vibe description is missing, cannot proceed with targeted search."
@@ -869,19 +946,44 @@ Justification:
             if not final_response["products"]:
                 print("Initial search yielded no products. Attempting to relax filters.")
                 
-                relaxable_filter_keys = ['color_or_print', 'occasion', 'fabric', 'fit', 
+                # Keep only category and size filters, move others to semantic search
+                filters_to_keep = ['category', 'size', 'price_min', 'price_max', 'budget']
+                filters_to_semanticize = ['color_or_print', 'occasion', 'fabric', 'fit', 
                                          'sleeve_length', 'length', 'neckline', 'pant_type']
                 
-                temp_relaxed_filters = current_filters.copy()
-                actually_relaxed_keys = []
-
-                for key_to_remove in relaxable_filter_keys:
-                    if key_to_remove in temp_relaxed_filters:
-                        del temp_relaxed_filters[key_to_remove]
-                        actually_relaxed_keys.append(key_to_remove)
+                temp_relaxed_filters = {}
+                semantic_additions = []
                 
-                if actually_relaxed_keys:
-                    print(f"Relaxed filters by removing: {actually_relaxed_keys}. New filter set for Chroma: {temp_relaxed_filters}")
+                # Keep only essential filters for ChromaDB
+                for key in filters_to_keep:
+                    if key in current_filters and current_filters[key] is not None:
+                        temp_relaxed_filters[key] = current_filters[key]
+                
+                # Collect removed filter values for semantic search
+                for key in filters_to_semanticize:
+                    if key in current_filters and current_filters[key] is not None:
+                        value = current_filters[key]
+                        if isinstance(value, list):
+                            semantic_additions.extend([str(v) for v in value if v])
+                        else:
+                            semantic_additions.append(str(value))
+                
+                if semantic_additions or temp_relaxed_filters:
+                    # Enhance the semantic query with filter values if available
+                    if semantic_additions:
+                        enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
+                        print(f"Enhanced semantic query with filters: {enhanced_query}")
+                        
+                        # Re-generate embedding for enhanced query
+                        enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
+                        enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
+                        
+                        print(f"Relaxed to keep only: {list(temp_relaxed_filters.keys())}. Added to semantic search: {semantic_additions}")
+                    else:
+                        # No semantic additions, use original query
+                        enhanced_query_embedding_list = query_embedding_list
+                        print(f"Relaxed to keep only: {list(temp_relaxed_filters.keys())}. No additional semantic terms.")
+                    
                     search_was_relaxed = True
 
                     chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
@@ -889,7 +991,7 @@ Justification:
 
                     try:
                         chroma_query_results_relaxed = self.collection.query(
-                            query_embeddings=query_embedding_list,
+                            query_embeddings=enhanced_query_embedding_list,
                             n_results=top_k_initial_fetch,
                             where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
                             include=['metadatas', 'documents', 'distances']
@@ -938,6 +1040,10 @@ Justification:
         else:
             print("No further follow-up question suggested or limit reached.")
             final_response["questions_asked_history"] = list(questions_asked_history)
+
+        # Update session storage with the final vibe used
+        self._update_session_data(session_id, vibe, input_to_assess)
+        print(f"DEVLOG: Updated session storage - vibe: '{vibe}', input: '{input_to_assess}'")
 
         return final_response
 
