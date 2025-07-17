@@ -795,10 +795,9 @@ Justification:
             "justification": None
         }
 
-        # If user is responding to a follow-up question, assume they have shopping intent
+        # If user is responding to a follow-up question, check intent
         if user_response and last_question_text:
-            print(f"User is responding to follow-up question: '{last_question_text}'. Assuming shopping intent.")
-            has_shopping_intent = True
+            print(f"User is responding to follow-up question: '{last_question_text}'. Checking shopping intent.")
             input_to_assess = user_response
             
             # Check if follow-up response is related to previous context or a fresh query
@@ -807,7 +806,16 @@ Justification:
             
             intent_assessment = self._assess_shopping_intent(user_response, previous_vibe)
             print(f"DEVLOG: Follow-up LLM assessment result: {intent_assessment}")
+            has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
+            suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
             is_related_query = intent_assessment.get("is_related_query", True)  # Default to related for follow-ups
+            
+            # Check if follow-up response has no shopping intent
+            if not has_shopping_intent:
+                print(f"Follow-up response '{user_response}' deemed to have no shopping intent.")
+                final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
+                final_response["products"] = []
+                return final_response
         else:
             # Only assess intent for initial interactions
             input_to_assess = ""
