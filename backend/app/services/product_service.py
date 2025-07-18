@@ -312,7 +312,12 @@ class ProductService:
         - If the vibe mentions a minimum (e.g., 'over $50', 'at least $50'), use 'price_min'.
         - If the vibe mentions a range (e.g., '$50 to $100', 'between $50 and $100'), extract both 'price_min' and 'price_max'.
         If the vibe mentions "plus size", "plus sized", "curvy", or similar terms, you should infer the 'size' attribute to include larger sizes such as ["XL", "XXL", "1X", "2X"].
-        Be conservative. If an attribute is not strongly implied or a valid value cannot be found, do not include it.
+        
+        CRITICAL: Be extremely conservative with restrictive attributes (fit, fabric, occasion) for broad vibes. 
+        For broad vibes like "date night", "party", "brunch", "casual", avoid inferring restrictive attributes unless explicitly mentioned.
+        For example, "date night" should NOT infer specific fit, fabric, or occasion unless the user specifically mentions these.
+        Only infer attributes that are explicitly mentioned or absolutely necessary for the vibe.
+        If an attribute is not strongly implied or a valid value cannot be found, do not include it.
         Output your answer ONLY as a JSON object. For example:
         {{"category": ["dress"], "fabric": ["linen", "cotton"], "occasion": "summer brunch"}}
         Another example, if vibe is "plus sized summer party under $75": {{"occasion": "party", "size": ["XL", "XXL"], "fabric": ["cotton", "linen"], "price_max": 75}}
@@ -320,6 +325,9 @@ class ProductService:
         Another example, if vibe is "sleeveless dresses": {{"category": ["dress"], "sleeve_length": "Sleeveless"}}
         Another example, if vibe is "work blouses, no black or blue": {{"category": ["top"], "occasion": "work", "exclude_colors": ["black", "blue"]}}
         Another example, if vibe is "tops and dresses, only sleeveless": {{"category": ["top", "dress"], "sleeve_length": "Sleeveless"}}
+        Another example, if vibe is "date night": {{"occasion": ["party", "Evening"], "category": ["dress", "top", "skirt"]}}
+        Another example, if vibe is "party": {{"occasion": ["party", "Evening"], "category": ["dress", "top", "skirt"]}}
+        Another example, if vibe is "summer": {{"fabric": ["linen", "cotton"]}}
         If no attributes can be confidently inferred, output an empty JSON object {{}}.
         JSON:
         """
@@ -815,6 +823,14 @@ Justification:
                 print(f"Follow-up response '{user_response}' deemed to have no shopping intent.")
                 final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
                 final_response["products"] = []
+                
+                # Check for context switch even for non-shopping follow-up responses
+                if not is_related_query:
+                    # Fresh query with no shopping intent - generate new session ID
+                    session_id = self._generate_session_id()
+                    print(f"Generated new session ID for fresh non-shopping follow-up: {session_id}")
+                    final_response["session_id"] = session_id
+                
                 return final_response
         else:
             # Only assess intent for initial interactions
@@ -827,6 +843,7 @@ Justification:
             if not input_to_assess:
                 final_response["justification"] = "Hello! How can I help you find some apparel today?"
                 final_response["products"] = []
+                final_response["session_id"] = session_id
                 return final_response
 
             # Get previous vibe for relatedness assessment
@@ -842,6 +859,14 @@ Justification:
                 print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
                 final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
                 final_response["products"] = []
+                
+                # Check for context switch even for non-shopping intent responses
+                if is_related_query is not None and not is_related_query:
+                    # Fresh query with no shopping intent - generate new session ID
+                    session_id = self._generate_session_id()
+                    print(f"Generated new session ID for fresh non-shopping query: {session_id}")
+                    final_response["session_id"] = session_id
+                
                 return final_response
         
         print(f"Input '{input_to_assess}' has shopping intent. Proceeding with product logic.")
@@ -850,10 +875,13 @@ Justification:
         if is_related_query is not None:
             print(f"Query relatedness assessment: {'related' if is_related_query else 'fresh'}")
             if not is_related_query:
-                # Fresh query - reset filters and questions history
-                print("Fresh query detected - resetting context.")
+                # Fresh query - reset filters and questions history, generate new session ID
+                print("Fresh query detected - resetting context and generating new session ID.")
                 current_filters = {}
                 questions_asked_history = []
+                # Generate new session ID for fresh query
+                session_id = self._generate_session_id()
+                print(f"Generated new session ID for fresh query: {session_id}")
                 # Update vibe to the new query (use the current input as the new vibe)
                 vibe = input_to_assess
                 print(f"Updated vibe for fresh query: '{vibe}'")
@@ -873,6 +901,7 @@ Justification:
                 if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
                     final_response["justification"] = updated_filters["__clarification_answer__"]
                     final_response["products"] = []
+                    final_response["session_id"] = session_id
                     return final_response
                 
                 current_filters = updated_filters
@@ -882,12 +911,16 @@ Justification:
             print("No previous context available - treating as fresh query.")
             current_filters = {}
             questions_asked_history = []
+            # Generate new session ID for fresh query (no previous context)
+            session_id = self._generate_session_id()
+            print(f"Generated new session ID for fresh query (no previous context): {session_id}")
             vibe = input_to_assess
             print(f"Updated vibe for fresh query (no previous context): '{vibe}'")
 
         if not vibe:
             final_response["justification"] = "Original vibe description is missing, cannot proceed with targeted search."
             final_response["products"] = []
+            final_response["session_id"] = session_id
             return final_response
 
         if user_response and last_question_text:
@@ -898,6 +931,7 @@ Justification:
             if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
                 final_response["justification"] = updated_filters["__clarification_answer__"]
                 final_response["products"] = []
+                final_response["session_id"] = session_id
                 return final_response
             
             current_filters = updated_filters
@@ -960,6 +994,9 @@ Justification:
                 
                 if final_products_after_py_filter:
                     final_response["products"] = final_products_after_py_filter[:top_k_target]
+                    print(f"FIRST PASS RESULTS ({len(final_response['products'])} products):")
+                    for i, product in enumerate(final_response["products"]):
+                        print(f"  {i+1}. [1ST PASS] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
                 else:
                     final_response["products"] = [] 
 
@@ -968,9 +1005,9 @@ Justification:
                 final_response["justification"] = "Error occurred during product search."
                 final_response["products"] = []
 
-            # Relaxation Logic if initial search failed
-            if not final_response["products"]:
-                print("Initial search yielded no products. Attempting to relax filters.")
+            # Relaxation Logic if initial search has less than 3 products
+            if len(final_response["products"]) < 3:
+                print(f"Initial search yielded {len(final_response['products'])} products. Attempting to relax filters to get more diverse results.")
                 
                 # Keep only category and size filters, move others to semantic search
                 filters_to_keep = ['category', 'size', 'price_min', 'price_max', 'budget']
@@ -1038,11 +1075,27 @@ Justification:
                         final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                         
                         if final_products_after_relaxed_py_filter:
-                            final_response["products"] = final_products_after_relaxed_py_filter[:top_k_target]
-                            print(f"Found {len(final_response['products'])} products after relaxing filters.")
+                            # Merge first pass and relaxed results, avoiding duplicates
+                            first_pass_products = final_response["products"]
+                            first_pass_ids = {p.get("id") for p in first_pass_products}
+                            
+                            # Add only top 4-5 relaxed results that aren't already in first pass
+                            merged_products = first_pass_products.copy()
+                            relaxed_added = 0
+                            max_relaxed_to_add = min(5, 8 - len(first_pass_products))  # Add up to 5, but respect total limit
+                            
+                            print(f"RELAXED PASS RESULTS (adding up to {max_relaxed_to_add} products):")
+                            for product in final_products_after_relaxed_py_filter:
+                                if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
+                                    merged_products.append(product)
+                                    relaxed_added += 1
+                                    print(f"  {len(first_pass_products) + relaxed_added}. [2ND PASS] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
+                            
+                            # Limit to top_k_target total results
+                            final_response["products"] = merged_products[:top_k_target]
+                            print(f"FINAL MERGED RESULTS: {len(first_pass_products)} from 1st pass + {relaxed_added} from 2nd pass = {len(final_response['products'])} total products.")
                         else:
-                            final_response["products"] = []
-                            print("Still no products found even after relaxing filters.")
+                            print("No additional products found after relaxing filters.")
                     except Exception as e:
                         print(f"Error during relaxed ChromaDB query or processing: {e}")
                         final_response["products"] = []
@@ -1070,6 +1123,9 @@ Justification:
         # Update session storage with the final vibe used
         self._update_session_data(session_id, vibe, input_to_assess)
         print(f"DEVLOG: Updated session storage - vibe: '{vibe}', input: '{input_to_assess}'")
+
+        # Include session ID in response
+        final_response["session_id"] = session_id
 
         return final_response
 

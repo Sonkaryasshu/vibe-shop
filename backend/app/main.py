@@ -81,13 +81,38 @@ def converse_route():
     try:
         result = product_service_instance.converse(service_payload)
         
-        session_state["current_filters"] = result.get("current_filters", session_state["current_filters"])
-        session_state["questions_asked_history"] = result.get("questions_asked_history", session_state["questions_asked_history"])
-        session_state["last_question_text"] = result.get("question_text_for_client") 
+        # Check if product service generated a new session ID (context switch)
+        returned_session_id = result.get("session_id", session_id)
         
-        conversation_sessions[session_id] = session_state
-        current_app.logger.info(f"Updated session state for {session_id} after service call: {session_state}")
-
+        if returned_session_id != session_id:
+            # Context switch occurred - create new session state with new session ID
+            current_app.logger.info(f"Context switch detected: {session_id} -> {returned_session_id}")
+            
+            # Create new session state for the new session ID
+            new_session_state = {
+                "vibe_description": data.get("user_response", ""),  # New vibe from user input
+                "current_filters": result.get("current_filters", {}),
+                "questions_asked_history": result.get("questions_asked_history", []),
+                "last_question_text": result.get("question_text_for_client")
+            }
+            
+            conversation_sessions[returned_session_id] = new_session_state
+            current_app.logger.info(f"Created new session state for {returned_session_id}: {new_session_state}")
+            
+            # Add context switch flag to result
+            result["context_switched"] = True
+            result["context_switch_message"] = "New conversation started - context switched to fresh query"
+            
+            # Use the new session ID for response
+            session_id = returned_session_id
+        else:
+            # No context switch - update existing session state
+            session_state["current_filters"] = result.get("current_filters", session_state["current_filters"])
+            session_state["questions_asked_history"] = result.get("questions_asked_history", session_state["questions_asked_history"])
+            session_state["last_question_text"] = result.get("question_text_for_client") 
+            
+            conversation_sessions[session_id] = session_state
+            current_app.logger.info(f"Updated session state for {session_id} after service call: {session_state}")
 
         response_payload = {**result, "session_id": session_id}
         current_app.logger.info(f"Response payload for session {session_id}: {json.dumps(response_payload, indent=2)}")

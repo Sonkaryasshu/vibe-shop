@@ -132,6 +132,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             
             sessionId = data.session_id;
+            
+            // Notify user if context switch occurred (from API response)
+            if (data.context_switched) {
+                appendMessage(`🔄 ${data.context_switch_message}`, 'agent', 'context-switch');
+            }
+            
             lastQuestionText = data.follow_up_question;
 
             if (data.follow_up_question) {
