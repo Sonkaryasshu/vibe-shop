@@ -186,8 +186,32 @@ class ProductService:
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
                 self.valid_attribute_values = {}
 
-    def _call_llm(self, prompt: str, response_format: str = "text", thinking_budget: int = 0) -> str:
+    def _call_llm(self, prompt: str, response_format: str = "text", thinking_budget: int = 0, use_pro_model: bool = False) -> str:
         """Call the configured LLM (Claude or Gemini) with the given prompt"""
+        # Force Gemini Pro if explicitly requested
+        if use_pro_model and self.gemini_client:
+            try:
+                start_time = time.time()
+                config = types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    )
+                )
+                if response_format == "json":
+                    config.response_mime_type = "application/json"
+                
+                response = self.gemini_client.models.generate_content(
+                    model=self.gemini_pro_model,
+                    contents=prompt,
+                    config=config
+                )
+                end_time = time.time()
+                print(f"Gemini Pro call took {end_time - start_time:.2f} seconds.")
+                return response.candidates[0].content.parts[0].text
+            except Exception as e:
+                print(f"Error calling Gemini Pro API: {e}. Falling back to Claude.")
+                # Fall back to Claude if Gemini Pro fails
+        
         if self.use_claude and self.anthropic_client:
             try:
                 start_time = time.time()
@@ -236,13 +260,17 @@ class ProductService:
                 if response_format == "json":
                     config.response_mime_type = "application/json"
                 
+                # Use Pro model if requested, otherwise use Flash
+                model_to_use = self.gemini_pro_model if use_pro_model else self.gemini_flash_model
+                
                 response = self.gemini_client.models.generate_content(
-                    model=self.gemini_flash_model,
+                    model=model_to_use,
                     contents=prompt,
                     config=config
                 )
                 end_time = time.time()
-                print(f"Gemini Flash call took {end_time - start_time:.2f} seconds.")
+                model_name = "Pro" if use_pro_model else "Flash"
+                print(f"Gemini {model_name} call took {end_time - start_time:.2f} seconds.")
                 return response.candidates[0].content.parts[0].text
             except Exception as e:
                 print(f"Error calling Gemini API: {e}")
@@ -358,11 +386,37 @@ class ProductService:
             print(f"Error during _assess_shopping_intent: {e}. Defaulting to has_shopping_intent: True.")
             return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": None}
 
-    def _infer_attributes_from_vibe(self, vibe_description: str) -> dict:
+    def _infer_attributes_from_vibe(self, vibe_description: str, previous_context: dict = None) -> dict:
+
+        # Handle previous context
+        previous_section = ""
+        if previous_context:
+            previous_vibe = previous_context.get("previous_vibe", "")
+            previous_filters = previous_context.get("previous_filters", {})
+            previous_types = previous_filters.get("attribute_types", {})
+            
+            # Remove attribute_types from filters for cleaner display
+            clean_previous_filters = {k: v for k, v in previous_filters.items() if k != "attribute_types"}
+            
+            previous_section = f"""
+        PREVIOUS CONTEXT:
+        - Previous user input: "{previous_vibe}"
+        - Previous filters extracted: {json.dumps(clean_previous_filters)}
+        - Previous explicit/implicit types: {json.dumps(previous_types)}
+        
+        Your task is to update the filters based on the new user input below, considering:
+        1. Keep explicit attributes from previous context unless directly contradicted
+        2. Update or replace implicit attributes with new information
+        3. Add new attributes from the current input
+        4. Properly classify all final attributes as explicit or implicit
+        """
 
         prompt = f"""
-        You are a fashion expert. Given the user's vibe: "{vibe_description}"
-        And the following examples of vibe-to-attribute mappings:
+        You are a fashion expert helping update product search filters.
+        {previous_section}
+        Current user input: "{vibe_description}"
+        
+        Using the following examples of vibe-to-attribute mappings:
         --- VIBE EXAMPLES START ---
         {self.vibe_examples_text_content}
         --- VIBE EXAMPLES END ---
@@ -394,25 +448,65 @@ class ProductService:
         For example, "date night" should NOT infer specific fit, fabric, or occasion unless the user specifically mentions these.
         Only infer attributes that are explicitly mentioned or absolutely necessary for the vibe.
         If an attribute is not strongly implied or a valid value cannot be found, do not include it.
-        Output your answer ONLY as a JSON object. For example:
-        {{"category": ["dress"], "fabric": ["linen", "cotton"], "occasion": "summer brunch"}}
-        Another example, if vibe is "plus sized summer party under $75": {{"occasion": "party", "size": ["XL", "XXL"], "fabric": ["cotton", "linen"], "price_max": 75}}
-        Another example, if vibe is "work pants between $60 and $120": {{"category": ["pants"], "occasion": "work", "price_min": 60, "price_max": 120}}
-        Another example, if vibe is "sleeveless dresses": {{"category": ["dress"], "sleeve_length": "Sleeveless"}}
-        Another example, if vibe is "work blouses, no black or blue": {{"category": ["top"], "occasion": "work", "exclude_colors": ["black", "blue"]}}
-        Another example, if vibe is "tops and dresses, only sleeveless": {{"category": ["top", "dress"], "sleeve_length": "Sleeveless"}}
-        Another example, if vibe is "date night": {{"occasion": ["party", "Evening"], "category": ["dress", "top", "skirt"]}}
-        Another example, if vibe is "party": {{"occasion": ["party", "Evening"], "category": ["dress", "top", "skirt"]}}
-        Another example, if vibe is "summer": {{"fabric": ["linen", "cotton"]}}
-        If no attributes can be confidently inferred, output an empty JSON object {{}}.
+        IMPORTANT NEW REQUIREMENT: For each attribute you infer, also determine if it's "explicit" or "implicit":
+        - EXPLICIT: User directly mentioned this attribute (e.g., "red dress", "work clothes", "size M", "under $100", "sleeveless", "linen tops")
+        - IMPLICIT: You inferred this attribute based on the general vibe (e.g., inferring "Cotton" for "summer casual", inferring "Party" occasion for "date night")
+        
+        Output your answer as a JSON object with two sections:
+        1. "attributes": regular attribute values
+        2. "attribute_types": mapping of each attribute to "explicit" or "implicit"
+        
+        Examples using real attribute values from our catalog:
+        
+        Vibe: "something flowy for date night"
+        {{"attributes": {{"fit": ["Flowy"], "occasion": ["Evening", "Party"], "category": ["dress", "top", "skirt"]}}, "attribute_types": {{"fit": "explicit", "occasion": "explicit", "category": "implicit"}}}}
+        
+        Vibe: "professional but comfortable bottoms"  
+        {{"attributes": {{"category": ["pants"], "occasion": ["Work"], "fit": ["Relaxed", "Tailored"]}}, "attribute_types": {{"category": "implicit", "occasion": "explicit", "fit": "explicit"}}}}
+        
+        Vibe: "bright summer vibes up to knee length"
+        {{"attributes": {{"fabric": ["Linen", "Cotton"], "length": ["Mini", "Short", "Knee length"], "color_or_print": ["Sunflower yellow", "Sunshine yellow", "Coral stripe", "Pastel yellow"]}}, "attribute_types": {{"fabric": "implicit", "length": "explicit", "color_or_print": "implicit"}}}}
+        
+        Vibe: "effortless but polished"
+        {{"attributes": {{"fit": ["Relaxed", "Tailored"], "fabric": ["Tencel", "Modal jersey", "Silk"], "occasion": ["Work", "Everyday"]}}, "attribute_types": {{"fit": "implicit", "fabric": "implicit", "occasion": "implicit"}}}}
+        
+        Vibe: "brunch outfit - something cute and comfy"  
+        {{"attributes": {{"occasion": ["Everyday"], "fit": ["Relaxed", "Flowy"], "category": ["dress", "top"], "fabric": ["Cotton", "Modal jersey", "Rayon"]}}, "attribute_types": {{"occasion": "implicit", "fit": "explicit", "category": "implicit", "fabric": "implicit"}}}}
+        
+        Vibe: "vacation ready - breathable and loose"
+        {{"attributes": {{"occasion": ["Vacation"], "fit": ["Relaxed", "Flowy"], "fabric": ["Linen", "Cotton gauze", "Viscose voile"], "category": ["dress", "top", "pants"]}}, "attribute_types": {{"occasion": "explicit", "fit": "explicit", "fabric": "explicit", "category": "implicit"}}}}
+        
+        Vibe: "night out dancing - want to move freely"
+        {{"attributes": {{"occasion": ["Party", "Evening"], "fit": ["Stretch to fit", "Body hugging"], "fabric": ["Stretch denim", "Ribbed jersey", "Crepe"]}}, "attribute_types": {{"occasion": "explicit", "fit": "implicit", "fabric": "implicit"}}}}
+        
+        Vibe: "client meeting tomorrow - navy or black preferred"
+        {{"attributes": {{"occasion": ["Work"], "color_or_print": ["Midnight navy", "Jet black", "Charcoal"], "fit": ["Tailored"]}}, "attribute_types": {{"occasion": "implicit", "color_or_print": "explicit", "fit": "implicit"}}}}
+        
+        Vibe: "work blouses no sleeves"
+        {{"attributes": {{"category": ["top"], "occasion": ["Work"], "sleeve_length": "Sleeveless"}}, "attribute_types": {{"category": "implicit", "occasion": "explicit", "sleeve_length": "explicit"}}}}
+        
+        Vibe: "brunch with friends"
+        {{"attributes": {{"occasion": ["Everyday"], "category": ["dress", "top"], "fit": ["Relaxed", "Flowy"]}}, "attribute_types": {{"occasion": "implicit", "category": "implicit", "fit": "implicit"}}}}
+        
+        Vibe: "party dress red under $100"
+        {{"attributes": {{"category": ["dress"], "occasion": ["Party"], "color_or_print": ["Red"], "price_max": 100}}, "attribute_types": {{"category": "explicit", "occasion": "implicit", "color_or_print": "explicit", "price_max": "explicit"}}}}
+        
+        If no attributes can be confidently inferred, output: {{"attributes": {{}}, "attribute_types": {{}}}}.
         JSON:
         """
         try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=512)
-            inferred_attributes = _parse_llm_json_output(response_text)
+            # Use Gemini Pro for better reasoning on explicit/implicit classification
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=1024, use_pro_model=True)
+            llm_response = _parse_llm_json_output(response_text)
+
+            # Expect new format with attributes and attribute_types
+            inferred_attributes = llm_response.get("attributes", {})
+            attribute_types = llm_response.get("attribute_types", {})
 
             if inferred_attributes and self.valid_attribute_values:
                 validated_attributes = {}
+                validated_attribute_types = {}
+                
                 for key, value in inferred_attributes.items():
                     if key in self.valid_attribute_values:
                         valid_options_for_key = self.valid_attribute_values[key]
@@ -420,17 +514,26 @@ class ProductService:
                             cleaned_values = [v for v in value if v in valid_options_for_key]
                             if cleaned_values:
                                 validated_attributes[key] = cleaned_values
+                                validated_attribute_types[key] = attribute_types.get(key, "implicit")
                         elif isinstance(value, str):
                             if value in valid_options_for_key:
                                 validated_attributes[key] = value
+                                validated_attribute_types[key] = attribute_types.get(key, "implicit")
                     else:
                         validated_attributes[key] = value
+                        validated_attribute_types[key] = attribute_types.get(key, "implicit")
                 
-                print(f"Original inferred attributes: {inferred_attributes}")
-                print(f"Validated attributes: {validated_attributes}")
+                # Add attribute_types to the result
+                if validated_attribute_types:
+                    validated_attributes["attribute_types"] = validated_attribute_types
+                
+                print(f"🎯 INFERRED ATTRIBUTES: {inferred_attributes}")
+                print(f"📋 EXPLICIT/IMPLICIT TYPES: {attribute_types}")
+                print(f"✅ VALIDATED FILTERS: {validated_attributes}")
                 return validated_attributes
             else:
-                return inferred_attributes
+                result = {"attribute_types": attribute_types} if attribute_types else {}
+                return result
 
         except Exception as e:
             print(f"Error inferring attributes from vibe: {e}")
@@ -566,7 +669,7 @@ class ProductService:
             where_conditions.append({"price": {"$gte": float(filters["price_min"])}})
         elif "price_max" in filters and filters["price_max"] is not None:
             where_conditions.append({"price": {"$lte": float(filters["price_max"])}})
-        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "exclude_colors"])
+        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "exclude_colors", "attribute_types"])
 
 
         for key, value in filters.items():
@@ -895,15 +998,15 @@ Justification:
                 print(f"Updated vibe for fresh query: '{vibe}'")
             else:
                 print("Related query detected - retaining context and combining vibe.")
-                # Combine old vibe with new input for related queries
-                original_vibe = vibe
-                combined_vibe = f"{original_vibe} {input_to_assess}"
+                # Combine old vibe with new input for related queries - use previous_vibe from session
+                original_vibe = previous_vibe or vibe or ""
+                combined_vibe = f"{original_vibe} {input_to_assess}".strip()
                 vibe = combined_vibe
                 print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{vibe}'")
                 
-                # Extract any attribute updates from related queries (like size changes)
-                print(f"Extracting attributes from related query: '{input_to_assess}'")
-                updated_filters = self._parse_user_answer_and_update_filters("", input_to_assess, current_filters)
+                # Always do full attribute inference for consistent explicit/implicit classification
+                print(f"Doing full attribute inference for related query: '{input_to_assess}'")
+                updated_filters = self._infer_attributes_from_vibe(combined_vibe)
                 
                 # Check if this is a clarification answer
                 if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
@@ -932,8 +1035,16 @@ Justification:
             return final_response
 
         if user_response and last_question_text:
-            print(f"Parsing user response: '{user_response}' to question: '{last_question_text}' with current filters: {current_filters}")
-            updated_filters = self._parse_user_answer_and_update_filters(last_question_text, user_response, current_filters)
+            print(f"📝 FOLLOW-UP ANSWER: '{user_response}' to question: '{last_question_text}'")
+            print(f"📦 PREVIOUS FILTERS: {current_filters}")
+            print(f"🔗 COMBINED VIBE: '{vibe}' + '{user_response}'")
+            
+            # Always do full attribute inference for consistent explicit/implicit classification  
+            previous_context = {
+                "previous_vibe": vibe,
+                "previous_filters": current_filters
+            }
+            updated_filters = self._infer_attributes_from_vibe(user_response, previous_context)
             
             # Check if this is a clarification answer
             if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
@@ -942,8 +1053,8 @@ Justification:
                 final_response["session_id"] = session_id
                 return final_response
             
+            print(f"🔄 NEW FILTERS: {updated_filters}")
             current_filters = updated_filters
-            print(f"Filters after parsing answer: {current_filters}")
 
         is_first_meaningful_interaction = not questions_asked_history and \
                                          (not current_filters or all(k in ['vibe_inferred'] for k in current_filters.keys()))
@@ -1013,102 +1124,102 @@ Justification:
                 final_response["justification"] = "Error occurred during product search."
                 final_response["products"] = []
 
-            # Relaxation Logic if initial search has less than 3 products
+            # New Relaxation Strategy: Ordered Implicit Attribute Removal
             if len(final_response["products"]) < 3:
-                print(f"Initial search yielded {len(final_response['products'])} products. Attempting to relax filters to get more diverse results.")
+                print(f"Initial search yielded {len(final_response['products'])} products. Starting ordered relaxation strategy.")
                 
-                # Keep only category and size filters, move others to semantic search
-                filters_to_keep = ['category', 'size', 'price_min', 'price_max', 'budget']
-                filters_to_semanticize = ['color_or_print', 'occasion', 'fabric', 'fit', 
-                                         'sleeve_length', 'length', 'neckline', 'pant_type']
+                # Get attribute types from filters
+                attribute_types = current_filters.get("attribute_types", {})
                 
-                temp_relaxed_filters = {}
+                # Define relaxation order for implicit attributes (neckline dropped first)
+                implicit_relaxation_order = ['neckline', 'sleeve_length', 'length', 'fabric', 'color_or_print', 'occasion', 'fit']
+                
+                # Always keep explicit attributes and essential filters
+                always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'exclude_colors', 'vibe_inferred']
+                
+                # Start with current filters and progressively remove implicit attributes
+                temp_relaxed_filters = {k: v for k, v in current_filters.items() if k != "attribute_types"}
                 semantic_additions = []
                 
-                # Keep only essential filters for ChromaDB
-                for key in filters_to_keep:
-                    if key in current_filters and current_filters[key] is not None:
-                        temp_relaxed_filters[key] = current_filters[key]
-                
-                # Collect removed filter values for semantic search
-                for key in filters_to_semanticize:
-                    if key in current_filters and current_filters[key] is not None:
-                        value = current_filters[key]
-                        if isinstance(value, list):
-                            semantic_additions.extend([str(v) for v in value if v])
-                        else:
-                            semantic_additions.append(str(value))
-                
-                if semantic_additions or temp_relaxed_filters:
-                    # Enhance the semantic query with filter values if available
-                    if semantic_additions:
-                        enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
-                        print(f"Enhanced semantic query with filters: {enhanced_query}")
+                for attribute_to_drop in implicit_relaxation_order:
+                    # Only drop if it's an implicit attribute and not in always_keep
+                    if (attribute_to_drop in temp_relaxed_filters and 
+                        attribute_to_drop not in always_keep and
+                        attribute_types.get(attribute_to_drop) == "implicit"):
                         
-                        # Re-generate embedding for enhanced query
+                        # Move dropped attribute to semantic search
+                        dropped_value = temp_relaxed_filters[attribute_to_drop]
+                        if isinstance(dropped_value, list):
+                            semantic_additions.extend([str(v) for v in dropped_value if v])
+                        else:
+                            semantic_additions.append(str(dropped_value))
+                        
+                        # Remove from filters
+                        del temp_relaxed_filters[attribute_to_drop]
+                        
+                        print(f"🔧 RELAXATION: Dropped implicit '{attribute_to_drop}' = {dropped_value} → semantic search")
+                        
+                        # Try search with this level of relaxation
+                        enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
+                        print(f"Enhanced semantic query: {enhanced_query}")
+                        
                         enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
                         enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
                         
-                        print(f"Relaxed to keep only: {list(temp_relaxed_filters.keys())}. Added to semantic search: {semantic_additions}")
-                    else:
-                        # No semantic additions, use original query
-                        enhanced_query_embedding_list = query_embedding_list
-                        print(f"Relaxed to keep only: {list(temp_relaxed_filters.keys())}. No additional semantic terms.")
-                    
+                        chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
+                        
+                        try:
+                            chroma_query_results_relaxed = self.collection.query(
+                                query_embeddings=enhanced_query_embedding_list,
+                                n_results=top_k_initial_fetch,
+                                where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
+                                include=['metadatas', 'documents', 'distances']
+                            )
+                            
+                            candidate_products_relaxed = []
+                            if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
+                                retrieved_ids_relaxed = set()
+                                for i in range(len(chroma_query_results_relaxed['ids'][0])):
+                                    prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
+                                    if prod_id_str_relaxed not in retrieved_ids_relaxed:
+                                        product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
+                                        if not product_series_df_relaxed.empty:
+                                            product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
+                                            candidate_products_relaxed.append(product_dict_relaxed)
+                                            retrieved_ids_relaxed.add(prod_id_str_relaxed)
+                            
+                            final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
+                            
+                            if len(final_products_after_relaxed_py_filter) >= 3:
+                                print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping '{attribute_to_drop}'")
+                                # Merge results and break
+                                first_pass_products = final_response["products"]
+                                first_pass_ids = {p.get("id") for p in first_pass_products}
+                                
+                                merged_products = first_pass_products.copy()
+                                relaxed_added = 0
+                                max_relaxed_to_add = min(5, 8 - len(first_pass_products))
+                                
+                                for product in final_products_after_relaxed_py_filter:
+                                    if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
+                                        merged_products.append(product)
+                                        relaxed_added += 1
+                                        print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
+                                
+                                final_response["products"] = merged_products[:top_k_target]
+                                search_was_relaxed = True
+                                break
+                            else:
+                                print(f"RELAXATION: Still only {len(final_products_after_relaxed_py_filter)} products, continuing...")
+                                
+                        except Exception as e:
+                            print(f"Error during relaxed search for '{attribute_to_drop}': {e}")
+                            continue
+                
+                # If we still don't have enough results after trying all implicit attributes
+                if len(final_response["products"]) < 3:
+                    print("RELAXATION: No success with ordered relaxation. Using final semantic-only search.")
                     search_was_relaxed = True
-
-                    chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
-                    print(f"DEVLOG: Relaxed ChromaDB where_clause: {json.dumps(chroma_where_clause_relaxed, indent=2)}")
-
-                    try:
-                        chroma_query_results_relaxed = self.collection.query(
-                            query_embeddings=enhanced_query_embedding_list,
-                            n_results=top_k_initial_fetch,
-                            where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
-                            include=['metadatas', 'documents', 'distances']
-                        )
-                        
-                        candidate_products_relaxed = []
-                        if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
-                            retrieved_ids_relaxed = set()
-                            for i in range(len(chroma_query_results_relaxed['ids'][0])):
-                                prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
-                                if prod_id_str_relaxed not in retrieved_ids_relaxed:
-                                    product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
-                                    if not product_series_df_relaxed.empty:
-                                        product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
-                                        candidate_products_relaxed.append(product_dict_relaxed)
-                                        retrieved_ids_relaxed.add(prod_id_str_relaxed)
-                        
-                        final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
-                        
-                        if final_products_after_relaxed_py_filter:
-                            # Merge first pass and relaxed results, avoiding duplicates
-                            first_pass_products = final_response["products"]
-                            first_pass_ids = {p.get("id") for p in first_pass_products}
-                            
-                            # Add only top 4-5 relaxed results that aren't already in first pass
-                            merged_products = first_pass_products.copy()
-                            relaxed_added = 0
-                            max_relaxed_to_add = min(5, 8 - len(first_pass_products))  # Add up to 5, but respect total limit
-                            
-                            print(f"RELAXED PASS RESULTS (adding up to {max_relaxed_to_add} products):")
-                            for product in final_products_after_relaxed_py_filter:
-                                if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
-                                    merged_products.append(product)
-                                    relaxed_added += 1
-                                    print(f"  {len(first_pass_products) + relaxed_added}. [2ND PASS] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
-                            
-                            # Limit to top_k_target total results
-                            final_response["products"] = merged_products[:top_k_target]
-                            print(f"FINAL MERGED RESULTS: {len(first_pass_products)} from 1st pass + {relaxed_added} from 2nd pass = {len(final_response['products'])} total products.")
-                        else:
-                            print("No additional products found after relaxing filters.")
-                    except Exception as e:
-                        print(f"Error during relaxed ChromaDB query or processing: {e}")
-                        final_response["products"] = []
-                else:
-                    print("No relaxable filters were present in current_filters. Cannot relax further.")
             
             if not final_response["products"]:
                 justification_text = self._generate_justification(vibe, [], current_filters, search_relaxed=search_was_relaxed)
