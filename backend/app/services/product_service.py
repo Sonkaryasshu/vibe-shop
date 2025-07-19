@@ -54,6 +54,7 @@ class ProductService:
         
         # Backend session management
         self.session_storage = {}  # Dictionary to store session data by session_id
+        self.MAX_SESSIONS = 1000  # Maximum number of sessions to keep
 
         try:
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -200,7 +201,7 @@ class ProductService:
                     ]
                     response = self.anthropic_client.messages.create(
                         model=self.claude_model,
-                        max_tokens=1024,
+                        max_tokens=5000,
                         messages=messages
                     )
                 else:
@@ -213,7 +214,7 @@ class ProductService:
                     ]
                     response = self.anthropic_client.messages.create(
                         model=self.claude_model,
-                        max_tokens=1024,
+                        max_tokens=5000,
                         messages=messages
                     )
                 end_time = time.time()
@@ -253,6 +254,15 @@ class ProductService:
     def _get_session_data(self, session_id: str) -> dict:
         """Get session data for a given session ID"""
         if session_id not in self.session_storage:
+            # Clean up old sessions if we exceed the limit
+            if len(self.session_storage) >= self.MAX_SESSIONS:
+                # Remove oldest half of sessions
+                sessions_to_remove = len(self.session_storage) // 2
+                oldest_sessions = list(self.session_storage.keys())[:sessions_to_remove]
+                for old_session in oldest_sessions:
+                    del self.session_storage[old_session]
+                print(f"Cleaned up {sessions_to_remove} old sessions. Current sessions: {len(self.session_storage)}")
+            
             self.session_storage[session_id] = {
                 "previous_vibe": None,
                 "conversation_history": []
@@ -264,9 +274,9 @@ class ProductService:
         session_data = self._get_session_data(session_id)
         session_data["previous_vibe"] = vibe
         session_data["conversation_history"].append(input_text)
-        # Keep only last 10 interactions to avoid memory bloat
-        if len(session_data["conversation_history"]) > 10:
-            session_data["conversation_history"] = session_data["conversation_history"][-10:]
+        # Keep only last 2 interactions to avoid memory bloat
+        if len(session_data["conversation_history"]) > 2:
+            session_data["conversation_history"] = session_data["conversation_history"][-2:]
     
     def _generate_session_id(self) -> str:
         """Generate a unique session ID"""
@@ -779,7 +789,7 @@ Justification:
             return "We found some great products for you! Their styles and features should match your vibe."
 
     def converse(self, session_payload: dict) -> dict:
-        session_id = session_payload.get("session_id", "default_session")
+        session_id = session_payload.get("session_id") or self._generate_session_id()
         vibe = session_payload.get("vibe_description")
         current_filters = session_payload.get("current_filters", {})
         user_response = session_payload.get("user_response")
