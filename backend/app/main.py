@@ -72,7 +72,6 @@ def converse_route():
         "last_question_text": session_state.get("last_question_text"),
         "questions_asked_history": session_state.get("questions_asked_history", [])
     }
-    current_app.logger.info(f"Service payload for session {session_id}: {json.dumps(service_payload, indent=2)}")
 
     if not product_service_instance:
         current_app.logger.error("Product service not available for /converse.")
