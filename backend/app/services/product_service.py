@@ -761,7 +761,8 @@ class ProductService:
             "Focus on characteristics like fit, fabric, color, style, occasion, patterns, and overall aesthetic.",
             "For example, if the vibe is 'classy summer wedding guest', you might describe 'elegant flowy dress, breathable fabric like silk or chiffon, possibly pastel floral print or solid light color, suitable for a formal outdoor occasion, midi or maxi length'.",
             "If the vibe is 'edgy streetwear', you might describe 'oversized graphic tee or hoodie, distressed denim or cargo pants, dark colors or bold prints, comfortable and urban style'.",
-            "\nOutput only the detailed textual description for semantic search. Do not add any conversational fluff.",
+            "\nFor vague inputs like 'buy', 'shop', or 'clothes', generate a broad description covering popular versatile pieces like 'casual comfortable clothing, everyday wear pieces, versatile tops and bottoms in neutral colors, suitable for multiple occasions'.",
+            "\nALWAYS generate a valid search description. Never refuse or explain why you cannot help. Output only the detailed textual description for semantic search.",
             "Detailed Description:"
         ]
         prompt = "\n".join(prompt_parts)
@@ -948,6 +949,10 @@ Justification:
                     print(f"Generated new session ID for fresh non-shopping follow-up: {session_id}")
                     final_response["session_id"] = session_id
                 
+                # Update session storage even for non-shopping follow-up inputs
+                self._update_session_data(session_id, vibe or input_to_assess, input_to_assess)
+                print(f"DEVLOG: Updated session storage for non-shopping follow-up - vibe: '{vibe or input_to_assess}', input: '{input_to_assess}'")
+                
                 return final_response
         else:
             # Only assess intent for initial interactions
@@ -978,11 +983,15 @@ Justification:
                 final_response["products"] = []
                 
                 # Check for context switch even for non-shopping intent responses
-                if is_related_query is not None and not is_related_query:
+                if not is_related_query:
                     # Fresh query with no shopping intent - generate new session ID
                     session_id = self._generate_session_id()
                     print(f"Generated new session ID for fresh non-shopping query: {session_id}")
                     final_response["session_id"] = session_id
+                
+                # Update session storage even for non-shopping inputs
+                self._update_session_data(session_id, vibe or input_to_assess, input_to_assess)
+                print(f"DEVLOG: Updated session storage for non-shopping input - vibe: '{vibe or input_to_assess}', input: '{input_to_assess}'")
                 
                 return final_response
         
@@ -1005,10 +1014,16 @@ Justification:
             else:
                 print("Related query detected - retaining context and combining vibe.")
                 # Combine old vibe with new input for related queries - use previous_vibe from session
+                # Avoid duplicating the same vibe description
                 original_vibe = previous_vibe or vibe or ""
-                combined_vibe = f"{original_vibe} {input_to_assess}".strip()
+                if original_vibe.strip() == input_to_assess.strip():
+                    # If the input is identical to the original vibe, don't duplicate
+                    combined_vibe = original_vibe
+                    print(f"Input identical to original vibe, using: '{combined_vibe}'")
+                else:
+                    combined_vibe = f"{original_vibe} {input_to_assess}".strip()
+                    print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{combined_vibe}'")
                 vibe = combined_vibe
-                print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{vibe}'")
                 
                 # Always do full attribute inference for consistent explicit/implicit classification
                 print(f"Doing full attribute inference for related query: '{input_to_assess}'")

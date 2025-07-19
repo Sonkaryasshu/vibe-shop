@@ -39,6 +39,8 @@ def converse_route():
     if not data:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
+    # Extract user input from any of these keys (user_response preferred, then vibe_description, then user_input)
+    user_input = data.get("user_response") or data.get("vibe_description") or data.get("user_input") or ""
     session_id = data.get("session_id")
     is_new_session = False
     if not session_id:
@@ -48,12 +50,11 @@ def converse_route():
         current_app.logger.info(f"New session started: {session_id}")
     
     if is_new_session or session_id not in conversation_sessions:
-        initial_vibe = data.get("vibe_description")
-        if not initial_vibe:
-            return jsonify({"error": "vibe_description is required to start a new conversation"}), 400
+        if not user_input:
+            return jsonify({"error": "user_response or vibe_description is required to start a new conversation"}), 400
         
         session_state = {
-            "vibe_description": initial_vibe,
+            "vibe_description": user_input,
             "current_filters": data.get("current_filters", {}),
             "questions_asked_history": [],
             "last_question_text": None
@@ -68,7 +69,7 @@ def converse_route():
         "session_id": session_id,
         "vibe_description": session_state["vibe_description"],
         "current_filters": session_state.get("current_filters", {}),
-        "user_response": data.get("user_response"),
+        "user_response": user_input,
         "last_question_text": session_state.get("last_question_text"),
         "questions_asked_history": session_state.get("questions_asked_history", [])
     }
@@ -89,7 +90,7 @@ def converse_route():
             
             # Create new session state for the new session ID
             new_session_state = {
-                "vibe_description": data.get("user_response", ""),  # New vibe from user input
+                "vibe_description": user_input,  # New vibe from user input
                 "current_filters": result.get("current_filters", {}),
                 "questions_asked_history": result.get("questions_asked_history", []),
                 "last_question_text": result.get("question_text_for_client")
