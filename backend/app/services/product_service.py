@@ -5,6 +5,7 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from google import genai
 from google.genai import types
+from anthropic import Anthropic
 import uuid
 import json
 import time
@@ -45,6 +46,9 @@ class ProductService:
         self.gemini_client = None
         self.gemini_pro_model = None
         self.gemini_flash_model = None
+        self.anthropic_client = None
+        self.claude_model = None
+        self.use_claude = False  # Toggle between Gemini and Claude
         self.MAX_FOLLOW_UP_QUESTIONS = 2
         self.valid_attribute_values = {}
         
@@ -58,6 +62,7 @@ class ProductService:
             print(f"Error loading SentenceTransformer model: {e}")
             self.embedding_model = None
         
+        # Initialize Gemini
         try:
             google_api_key = os.getenv("GOOGLE_API_KEY")
             if google_api_key:
@@ -71,6 +76,21 @@ class ProductService:
         except Exception as e:
             print(f"Error configuring Gemini API: {e}")
             self.gemini_client = None
+        
+        # Initialize Claude
+        try:
+            anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+            if anthropic_api_key:
+                self.anthropic_client = Anthropic(api_key=anthropic_api_key)
+                self.claude_model = "claude-sonnet-4-20250514"
+                self.use_claude = True  # Use Claude by default
+                print(f"Successfully configured Anthropic API with model: {self.claude_model}. Use Claude: {self.use_claude}")
+            else:
+                print("Warning: ANTHROPIC_API_KEY environment variable not found. Claude LLM features will be disabled.")
+                self.anthropic_client = None
+        except Exception as e:
+            print(f"Error configuring Anthropic API: {e}")
+            self.anthropic_client = None
         
         try:
             self.chroma_client = chromadb.Client()
@@ -165,6 +185,71 @@ class ProductService:
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
                 self.valid_attribute_values = {}
 
+    def _call_llm(self, prompt: str, response_format: str = "text", thinking_budget: int = 0) -> str:
+        """Call the configured LLM (Claude or Gemini) with the given prompt"""
+        if self.use_claude and self.anthropic_client:
+            try:
+                start_time = time.time()
+                if response_format == "json":
+                    # For JSON responses with Claude
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": f"{prompt}\n\nPlease respond with valid JSON only."
+                        }
+                    ]
+                    response = self.anthropic_client.messages.create(
+                        model=self.claude_model,
+                        max_tokens=1024,
+                        messages=messages
+                    )
+                else:
+                    # For text responses with Claude
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                    response = self.anthropic_client.messages.create(
+                        model=self.claude_model,
+                        max_tokens=1024,
+                        messages=messages
+                    )
+                end_time = time.time()
+                print(f"Claude call took {end_time - start_time:.2f} seconds.")
+                return response.content[0].text
+            except Exception as e:
+                print(f"Error calling Claude API: {e}. Falling back to Gemini.")
+                # Fall back to Gemini if Claude fails
+        
+        # Use Gemini (default or fallback)
+        if self.gemini_client:
+            try:
+                start_time = time.time()
+                config = types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    )
+                )
+                if response_format == "json":
+                    config.response_mime_type = "application/json"
+                
+                response = self.gemini_client.models.generate_content(
+                    model=self.gemini_flash_model,
+                    contents=prompt,
+                    config=config
+                )
+                end_time = time.time()
+                print(f"Gemini Flash call took {end_time - start_time:.2f} seconds.")
+                return response.candidates[0].content.parts[0].text
+            except Exception as e:
+                print(f"Error calling Gemini API: {e}")
+                return ""
+        
+        print("No LLM client available (neither Claude nor Gemini).")
+        return ""
+
     def _get_session_data(self, session_id: str) -> dict:
         """Get session data for a given session ID"""
         if session_id not in self.session_storage:
@@ -188,9 +273,6 @@ class ProductService:
         return f"session_{uuid.uuid4().hex[:12]}"
 
     def _assess_shopping_intent(self, user_input: str, previous_vibe: str = None) -> dict:
-        if not self.gemini_client:
-            print("Gemini client not available for assessing shopping intent. Defaulting to has_shopping_intent: True.")
-            return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": True}
         if not user_input:
             print("Empty input for shopping intent assessment. Defaulting to has_shopping_intent: False.")
             return {"has_shopping_intent": False, "suggested_reply_if_no_intent": "Hello! How can I help you find some apparel today?", "is_related_query": False}
@@ -251,21 +333,8 @@ class ProductService:
         JSON:
         """
         try:
-            start_time = time.time()
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_flash_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0  # No thinking needed for simple intent detection
-                    ),
-                    response_mime_type="application/json"
-                )
-            )
-            end_time = time.time()
-            print(f"Gemini Flash call to _assess_shopping_intent took {end_time - start_time:.2f} seconds.")
-            
-            assessment_result = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
+            assessment_result = _parse_llm_json_output(response_text)
             if isinstance(assessment_result, dict) and "has_shopping_intent" in assessment_result:
                 return {
                     "has_shopping_intent": assessment_result.get("has_shopping_intent", False),
@@ -273,16 +342,13 @@ class ProductService:
                     "is_related_query": assessment_result.get("is_related_query", None)
                 }
             else:
-                print(f"Failed to parse valid shopping intent assessment from LLM: {response.text}. Defaulting to has_shopping_intent: True.")
+                print(f"Failed to parse valid shopping intent assessment from LLM: {response_text}. Defaulting to has_shopping_intent: True.")
                 return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": None}
         except Exception as e:
-            print(f"Error during _assess_shopping_intent with Gemini: {e}. Defaulting to has_shopping_intent: True.")
+            print(f"Error during _assess_shopping_intent: {e}. Defaulting to has_shopping_intent: True.")
             return {"has_shopping_intent": True, "suggested_reply_if_no_intent": None, "is_related_query": None}
 
     def _infer_attributes_from_vibe(self, vibe_description: str) -> dict:
-        if not self.gemini_client:
-            print("Gemini client not available for inferring attributes from vibe.")
-            return {}
 
         prompt = f"""
         You are a fashion expert. Given the user's vibe: "{vibe_description}"
@@ -332,20 +398,8 @@ class ProductService:
         JSON:
         """
         try:
-            start_time = time.time()
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_flash_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=512  # Flash with moderate thinking for attribute inference
-                    ),
-                    response_mime_type="application/json"
-                )
-            )
-            end_time = time.time()
-            print(f"Gemini Flash call to _infer_attributes_from_vibe took {end_time - start_time:.2f} seconds.")
-            inferred_attributes = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=512)
+            inferred_attributes = _parse_llm_json_output(response_text)
 
             if inferred_attributes and self.valid_attribute_values:
                 validated_attributes = {}
@@ -369,13 +423,10 @@ class ProductService:
                 return inferred_attributes
 
         except Exception as e:
-            print(f"Error inferring attributes from vibe with Gemini: {e}")
+            print(f"Error inferring attributes from vibe: {e}")
             return {}
 
     def _parse_user_answer_and_update_filters(self, last_question_text: str, user_answer: str, current_filters: dict) -> dict:
-        if not self.gemini_client:
-            print("Gemini client not available for parsing user answer.")
-            return current_filters
 
         filters_for_prompt = {k: v for k, v in current_filters.items() if k != "vibe_inferred"}
 
@@ -412,21 +463,8 @@ class ProductService:
         JSON:
         """
         try:
-            start_time = time.time()
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_flash_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0  # No thinking needed for simple parsing
-                    ),
-                    response_mime_type="application/json"
-                )
-            )
-            end_time = time.time()
-            print(f"Gemini Flash call to _parse_user_answer_and_update_filters took {end_time - start_time:.2f} seconds.")
-            
-            llm_suggested_changes = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
+            llm_suggested_changes = _parse_llm_json_output(response_text)
             if isinstance(llm_suggested_changes, dict):
                 # Check if this is a clarification answer
                 if "clarification_answer" in llm_suggested_changes:
@@ -445,13 +483,10 @@ class ProductService:
                     return new_filters
             return current_filters
         except Exception as e:
-            print(f"Error parsing user answer with Gemini: {e}")
+            print(f"Error parsing user answer: {e}")
             return current_filters
 
     def _determine_next_follow_up(self, vibe_description: str, current_filters: dict, questions_asked_history: list) -> tuple[str | None, str | None, str | None]:
-        if not self.gemini_client:
-            print("Gemini client not available for determining follow-up.")
-            return None, None, None
         
         if len(questions_asked_history) >= self.MAX_FOLLOW_UP_QUESTIONS:
             print(f"Max follow-up questions ({self.MAX_FOLLOW_UP_QUESTIONS}) reached or exceeded. Not asking another.")
@@ -495,20 +530,8 @@ class ProductService:
         JSON:
         """
         try:
-            start_time = time.time()
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_flash_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0  # No thinking needed for simple follow-up logic
-                    ),
-                    response_mime_type="application/json"
-                )
-            )
-            end_time = time.time()
-            print(f"Gemini Flash call to _determine_next_follow_up took {end_time - start_time:.2f} seconds.")
-            decision = _parse_llm_json_output(response.candidates[0].content.parts[0].text)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
+            decision = _parse_llm_json_output(response_text)
             
             if decision.get("next_question_text") is None:
                 return None, None, None
@@ -520,7 +543,7 @@ class ProductService:
                 return None, None, None
 
         except Exception as e:
-            print(f"Error determining next follow-up with Gemini: {e}")
+            print(f"Error determining next follow-up: {e}")
             return None, None, None
 
     def _build_chroma_where_clause(self, filters: dict) -> dict | None:
@@ -608,43 +631,31 @@ class ProductService:
         return filtered_products
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
-        if self.gemini_client:
-            prompt_parts = [
-                "You are a fashion assistant. Your task is to translate a user's desired \"vibe\" into a descriptive textual query that can be used for semantic search of apparel.",
-                "Use the following examples of how vibes map to product attributes as a guide:",
-                "--- VIBE EXAMPLES START ---",
-                self.vibe_examples_text_content,
-                "--- VIBE EXAMPLES END ---",
-                f"\nUser's desired vibe: \"{vibe_description}\"",
-                "\nBased on the user's vibe and the provided examples, generate a detailed textual description of product attributes that would match this vibe.",
-                "Focus on characteristics like fit, fabric, color, style, occasion, patterns, and overall aesthetic.",
-                "For example, if the vibe is 'classy summer wedding guest', you might describe 'elegant flowy dress, breathable fabric like silk or chiffon, possibly pastel floral print or solid light color, suitable for a formal outdoor occasion, midi or maxi length'.",
-                "If the vibe is 'edgy streetwear', you might describe 'oversized graphic tee or hoodie, distressed denim or cargo pants, dark colors or bold prints, comfortable and urban style'.",
-                "\nOutput only the detailed textual description for semantic search. Do not add any conversational fluff.",
-                "Detailed Description:"
-            ]
-            prompt = "\n".join(prompt_parts)
-            try:
-                start_time = time.time()
-                response = self.gemini_client.models.generate_content(
-                    model=self.gemini_flash_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=256  # Lighter thinking for query refinement
-                        )
-                    )
-                )
-                end_time = time.time()
-                print(f"Gemini Flash call to _refine_query_based_on_vibe took {end_time - start_time:.2f} seconds.")
-                if response.candidates[0].content.parts[0].text:
-                    llm_refined_query = response.candidates[0].content.parts[0].text.strip()
-                    print(f"Gemini refined query: '{llm_refined_query}'")
-                    return llm_refined_query
-                else:
-                    print("Gemini response was empty. Falling back.")
-            except Exception as e:
-                print(f"Gemini API call failed: {e}. Falling back.")
+        prompt_parts = [
+            "You are a fashion assistant. Your task is to translate a user's desired \"vibe\" into a descriptive textual query that can be used for semantic search of apparel.",
+            "Use the following examples of how vibes map to product attributes as a guide:",
+            "--- VIBE EXAMPLES START ---",
+            self.vibe_examples_text_content,
+            "--- VIBE EXAMPLES END ---",
+            f"\nUser's desired vibe: \"{vibe_description}\"",
+            "\nBased on the user's vibe and the provided examples, generate a detailed textual description of product attributes that would match this vibe.",
+            "Focus on characteristics like fit, fabric, color, style, occasion, patterns, and overall aesthetic.",
+            "For example, if the vibe is 'classy summer wedding guest', you might describe 'elegant flowy dress, breathable fabric like silk or chiffon, possibly pastel floral print or solid light color, suitable for a formal outdoor occasion, midi or maxi length'.",
+            "If the vibe is 'edgy streetwear', you might describe 'oversized graphic tee or hoodie, distressed denim or cargo pants, dark colors or bold prints, comfortable and urban style'.",
+            "\nOutput only the detailed textual description for semantic search. Do not add any conversational fluff.",
+            "Detailed Description:"
+        ]
+        prompt = "\n".join(prompt_parts)
+        try:
+            response_text = self._call_llm(prompt, response_format="text", thinking_budget=256)
+            if response_text:
+                llm_refined_query = response_text.strip()
+                print(f"LLM refined query: '{llm_refined_query}'")
+                return llm_refined_query
+            else:
+                print("LLM response was empty. Falling back.")
+        except Exception as e:
+            print(f"LLM API call failed: {e}. Falling back.")
         
         print(f"Falling back to original vibe description: '{vibe_description}'")
         return vibe_description
@@ -706,8 +717,6 @@ class ProductService:
             print(f"Error building ChromaDB vector store: {e}")
 
     def _generate_justification(self, vibe_description: str, products: list, current_filters: dict, search_relaxed: bool = False) -> str:
-        if not self.gemini_client:
-            return "Could not generate justification as the language model is not available."
 
         if not products:
             if search_relaxed:
@@ -763,21 +772,10 @@ IMPORTANT: Keep it under 30 words. Be specific about how the products match the 
 Justification:
 """
         try:
-            start_time = time.time()
-            response = self.gemini_client.models.generate_content(
-                model=self.gemini_flash_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=512  # Flash with moderate thinking for justification
-                    )
-                )
-            )
-            end_time = time.time()
-            print(f"Gemini Flash call to _generate_justification took {end_time - start_time:.2f} seconds.")
-            return response.candidates[0].content.parts[0].text.strip()
+            response_text = self._call_llm(prompt, response_format="text", thinking_budget=512)
+            return response_text.strip() if response_text else "We found some great products for you! Their styles and features should match your vibe."
         except Exception as e:
-            print(f"Error generating justification with Gemini: {e}")
+            print(f"Error generating justification: {e}")
             return "We found some great products for you! Their styles and features should match your vibe."
 
     def converse(self, session_payload: dict) -> dict:
