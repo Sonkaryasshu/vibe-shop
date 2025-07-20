@@ -1229,7 +1229,6 @@ Justification:
                                         print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
                                 
                                 final_response["products"] = merged_products[:top_k_target]
-                                search_was_relaxed = True
                                 break
                             else:
                                 print(f"RELAXATION: Still only {len(final_products_after_relaxed_py_filter)} products, continuing...")
@@ -1257,6 +1256,7 @@ Justification:
                             
                             # Remove from filters
                             del temp_relaxed_filters[attribute_to_drop]
+                            search_was_relaxed = True
                             
                             print(f"🔧 EXPLICIT DROP: '{attribute_to_drop}' = {dropped_value} → semantic search")
                             
@@ -1292,7 +1292,6 @@ Justification:
                                 if len(final_products_after_relaxed_py_filter) > 0:
                                     print(f"SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping explicit '{attribute_to_drop}'")
                                     final_response["products"] = final_products_after_relaxed_py_filter[:top_k_target]
-                                    search_was_relaxed = True
                                     break
                                 else:
                                     print(f"Still 0 products, continuing...")
