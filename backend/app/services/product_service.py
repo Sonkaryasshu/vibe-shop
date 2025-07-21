@@ -9,6 +9,7 @@ from anthropic import Anthropic
 import uuid
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Fix HuggingFace tokenizers warning in Flask/threading environment
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -750,17 +751,24 @@ class ProductService:
         return filtered_products
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
+        # Include available attribute values in the prompt
+        available_values_text = ""
+        if hasattr(self, 'valid_attribute_values') and self.valid_attribute_values:
+            available_values_text = f"\n--- AVAILABLE ATTRIBUTE VALUES ---\n{json.dumps(self.valid_attribute_values, indent=2)}\n--- END AVAILABLE VALUES ---\n"
+        
         prompt_parts = [
             "You are a fashion assistant. Your task is to translate a user's desired \"vibe\" into a descriptive textual query that can be used for semantic search of apparel.",
             "Use the following examples of how vibes map to product attributes as a guide:",
             "--- VIBE EXAMPLES START ---",
             self.vibe_examples_text_content,
             "--- VIBE EXAMPLES END ---",
+            available_values_text,
             f"\nUser's desired vibe: \"{vibe_description}\"",
-            "\nBased on the user's vibe and the provided examples, generate a detailed textual description of product attributes that would match this vibe.",
-            "Focus on characteristics like fit, fabric, color, style, occasion, patterns, and overall aesthetic.",
-            "For example, if the vibe is 'classy summer wedding guest', you might describe 'elegant flowy dress, breathable fabric like silk or chiffon, possibly pastel floral print or solid light color, suitable for a formal outdoor occasion, midi or maxi length'.",
-            "If the vibe is 'edgy streetwear', you might describe 'oversized graphic tee or hoodie, distressed denim or cargo pants, dark colors or bold prints, comfortable and urban style'.",
+            "\nBased on the user's vibe, the provided examples, and the available attribute values above, generate a descriptive textual query that captures the essence of this style.",
+            "Be INCLUSIVE - when generating descriptions, include multiple variations that could match the vibe. Use the available attribute values as reference but don't limit yourself to only those exact terms.",
+            "For elegant styles: include both sophisticated formal pieces AND elevated casual pieces, various luxurious fabrics (sequins, satin, silk, velvet, etc.), different elegant occasions (parties, dinners, events, evening wear).",
+            "For casual styles: include comfortable fits, everyday fabrics, versatile pieces suitable for daily wear.",
+            "Focus on the overall aesthetic feeling and style characteristics while being broad enough to match diverse interpretations of the vibe.",
             "\nFor vague inputs like 'buy', 'shop', or 'clothes', generate a broad description covering popular versatile pieces like 'casual comfortable clothing, everyday wear pieces, versatile tops and bottoms in neutral colors, suitable for multiple occasions'.",
             "\nALWAYS generate a valid search description. Never refuse or explain why you cannot help. Output only the detailed textual description for semantic search.",
             "Detailed Description:"
@@ -1100,10 +1108,7 @@ Justification:
         print(f"DEVLOG: ChromaDB where_clause: {json.dumps(chroma_where_clause, indent=2)}")
         
         top_k_target = 8
-        top_k_initial_fetch = top_k_target 
-        if "size" in current_filters and current_filters["size"]:
-            top_k_initial_fetch = top_k_target * 4
-
+        top_k_initial_fetch = top_k_target * 3  # Increased to catch more semantic candidates and handle size filtering
         search_was_relaxed = False
 
         if self.collection is None or self.embedding_model is None or self.collection.count() == 0:
@@ -1146,9 +1151,9 @@ Justification:
                 final_response["justification"] = "Error occurred during product search."
                 final_response["products"] = []
 
-            # New Relaxation Strategy: Ordered Implicit Attribute Removal
-            if len(final_response["products"]) < 3:
-                print(f"Initial search yielded {len(final_response['products'])} products. Starting ordered relaxation strategy.")
+            # New Relaxation Strategy: Drop All Implicit Attributes at Once
+            if len(final_response["products"]) < 8:
+                print(f"Initial search yielded {len(final_response['products'])} products. Starting relaxation strategy - dropping all implicit attributes at once.")
                 
                 # Get attribute types from filters
                 attribute_types = current_filters.get("attribute_types", {})
@@ -1159,10 +1164,12 @@ Justification:
                 # Always keep explicit attributes and essential filters
                 always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'exclude_colors', 'vibe_inferred']
                 
-                # Start with current filters and progressively remove implicit attributes
+                # Start with current filters and remove all implicit attributes at once
                 temp_relaxed_filters = {k: v for k, v in current_filters.items() if k != "attribute_types"}
                 semantic_additions = []
                 
+                # Drop all implicit attributes at once
+                implicit_attributes_dropped = []
                 for attribute_to_drop in implicit_relaxation_order:
                     # Only drop if it's an implicit attribute and not in always_keep
                     if (attribute_to_drop in temp_relaxed_filters and 
@@ -1178,64 +1185,64 @@ Justification:
                         
                         # Remove from filters
                         del temp_relaxed_filters[attribute_to_drop]
+                        implicit_attributes_dropped.append((attribute_to_drop, dropped_value))
+                
+                if implicit_attributes_dropped:
+                    print(f"🔧 RELAXATION: Dropped all implicit attributes at once: {[attr for attr, _ in implicit_attributes_dropped]} → semantic search")
+                    
+                    # Try search with all implicit attributes relaxed
+                    enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
+                    print(f"Enhanced semantic query: {enhanced_query}")
+                    
+                    enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
+                    enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
+                    
+                    chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
+                    
+                    try:
+                        chroma_query_results_relaxed = self.collection.query(
+                            query_embeddings=enhanced_query_embedding_list,
+                            n_results=top_k_initial_fetch,
+                            where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
+                            include=['metadatas', 'documents', 'distances']
+                        )
                         
-                        print(f"🔧 RELAXATION: Dropped implicit '{attribute_to_drop}' = {dropped_value} → semantic search")
+                        candidate_products_relaxed = []
+                        if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
+                            retrieved_ids_relaxed = set()
+                            for i in range(len(chroma_query_results_relaxed['ids'][0])):
+                                prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
+                                if prod_id_str_relaxed not in retrieved_ids_relaxed:
+                                    product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
+                                    if not product_series_df_relaxed.empty:
+                                        product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
+                                        candidate_products_relaxed.append(product_dict_relaxed)
+                                        retrieved_ids_relaxed.add(prod_id_str_relaxed)
                         
-                        # Try search with this level of relaxation
-                        enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
-                        print(f"Enhanced semantic query: {enhanced_query}")
+                        final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                         
-                        enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
-                        enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
-                        
-                        chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
-                        
-                        try:
-                            chroma_query_results_relaxed = self.collection.query(
-                                query_embeddings=enhanced_query_embedding_list,
-                                n_results=top_k_initial_fetch,
-                                where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
-                                include=['metadatas', 'documents', 'distances']
-                            )
+                        if len(final_products_after_relaxed_py_filter) >= 8:
+                            print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes")
+                            # Merge results
+                            first_pass_products = final_response["products"]
+                            first_pass_ids = {p.get("id") for p in first_pass_products}
                             
-                            candidate_products_relaxed = []
-                            if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
-                                retrieved_ids_relaxed = set()
-                                for i in range(len(chroma_query_results_relaxed['ids'][0])):
-                                    prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
-                                    if prod_id_str_relaxed not in retrieved_ids_relaxed:
-                                        product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
-                                        if not product_series_df_relaxed.empty:
-                                            product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
-                                            candidate_products_relaxed.append(product_dict_relaxed)
-                                            retrieved_ids_relaxed.add(prod_id_str_relaxed)
+                            merged_products = first_pass_products.copy()
+                            relaxed_added = 0
+                            max_relaxed_to_add = 8 - len(first_pass_products)
                             
-                            final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
+                            for product in final_products_after_relaxed_py_filter:
+                                if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
+                                    merged_products.append(product)
+                                    relaxed_added += 1
+                                    print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
                             
-                            if len(final_products_after_relaxed_py_filter) >= 3:
-                                print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping '{attribute_to_drop}'")
-                                # Merge results and break
-                                first_pass_products = final_response["products"]
-                                first_pass_ids = {p.get("id") for p in first_pass_products}
-                                
-                                merged_products = first_pass_products.copy()
-                                relaxed_added = 0
-                                max_relaxed_to_add = min(5, 8 - len(first_pass_products))
-                                
-                                for product in final_products_after_relaxed_py_filter:
-                                    if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
-                                        merged_products.append(product)
-                                        relaxed_added += 1
-                                        print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
-                                
-                                final_response["products"] = merged_products[:top_k_target]
-                                break
-                            else:
-                                print(f"RELAXATION: Still only {len(final_products_after_relaxed_py_filter)} products, continuing...")
-                                
-                        except Exception as e:
-                            print(f"Error during relaxed search for '{attribute_to_drop}': {e}")
-                            continue
+                            final_response["products"] = merged_products[:top_k_target]
+                        else:
+                            print(f"RELAXATION: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes, but need 8. Continuing to phase 2...")
+                            
+                    except Exception as e:
+                        print(f"Error during relaxed search: {e}")
                 
                 # If we still have 0 products after trying all implicit attributes, try explicit too
                 if len(final_response["products"]) == 0:
