@@ -121,3 +121,33 @@ def converse_route():
     except Exception as e:
         current_app.logger.error(f"Error in /converse endpoint for session {session_id}: {e}", exc_info=True)
         return jsonify({"error": "An internal server error occurred during conversation."}), 500
+
+
+@main_bp.route('/clear-cache', methods=['GET'])
+def clear_all_cache():
+    """Clear all caches - callable from browser"""
+    if not product_service_instance:
+        return jsonify({"error": "Service not available"}), 503
+    
+    # Clear semantic query cache
+    semantic_count = len(product_service_instance.semantic_query_cache)
+    product_service_instance.semantic_query_cache.clear()
+    
+    # Clear session storage
+    session_count = len(product_service_instance.session_storage)
+    product_service_instance.session_storage.clear()
+    
+    # Clear conversation sessions
+    conversation_count = len(conversation_sessions)
+    conversation_sessions.clear()
+    
+    current_app.logger.info(f"Manual cache clear - Semantic: {semantic_count}, Sessions: {session_count}, Conversations: {conversation_count}")
+    
+    return jsonify({
+        "message": "✅ All caches cleared successfully!",
+        "cleared": {
+            "semantic_query_cache": f"{semantic_count} entries",
+            "session_storage": f"{session_count} entries", 
+            "conversation_sessions": f"{conversation_count} entries"
+        }
+    })

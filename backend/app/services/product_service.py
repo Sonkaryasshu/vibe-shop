@@ -59,6 +59,10 @@ class ProductService:
         # Backend session management
         self.session_storage = {}  # Dictionary to store session data by session_id
         self.MAX_SESSIONS = 1000  # Maximum number of sessions to keep
+        
+        # Semantic query caching for performance optimization
+        self.semantic_query_cache = {}  # Dictionary to cache semantic queries by normalized vibe
+        self.MAX_CACHE_ENTRIES = 100  # Maximum number of cached queries
 
         try:
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -190,7 +194,7 @@ class ProductService:
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
                 self.valid_attribute_values = {}
 
-    def _call_llm(self, prompt: str, response_format: str = "text", thinking_budget: int = 0, use_pro_model: bool = False) -> str:
+    def _call_llm(self, prompt: str, response_format: str = "text", thinking_budget: int = 0, use_pro_model: bool = False, context: str = "general", cacheable_prefix: str = None) -> str:
         """Call the configured LLM (Claude or Gemini) with the given prompt"""
         # Force Gemini Pro if explicitly requested
         if use_pro_model and self.gemini_client:
@@ -210,7 +214,7 @@ class ProductService:
                     config=config
                 )
                 end_time = time.time()
-                print(f"Gemini Pro call took {end_time - start_time:.2f} seconds.")
+                print(f"{context} Gemini Pro call took {end_time - start_time:.2f} seconds.")
                 return response.candidates[0].content.parts[0].text
             except Exception as e:
                 print(f"Error calling Gemini Pro API: {e}. Falling back to Claude.")
@@ -219,34 +223,51 @@ class ProductService:
         if self.use_claude and self.anthropic_client:
             try:
                 start_time = time.time()
-                if response_format == "json":
-                    # For JSON responses with Claude
+                
+                # Build messages with prompt caching if cacheable_prefix provided
+                if cacheable_prefix:
+                    # Structure: [cacheable system message] + [user message with specific query]
+                    remaining_prompt = prompt[len(cacheable_prefix):].strip()
                     messages = [
                         {
-                            "role": "user",
-                            "content": f"{prompt}\n\nPlease respond with valid JSON only."
+                            "role": "user", 
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": cacheable_prefix,
+                                    "cache_control": {"type": "ephemeral"}
+                                },
+                                {
+                                    "type": "text", 
+                                    "text": remaining_prompt + ("\n\nPlease respond with valid JSON only." if response_format == "json" else "")
+                                }
+                            ]
                         }
                     ]
-                    response = self.anthropic_client.messages.create(
-                        model=self.claude_model,
-                        max_tokens=5000,
-                        messages=messages
-                    )
                 else:
-                    # For text responses with Claude
-                    messages = [
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ]
-                    response = self.anthropic_client.messages.create(
-                        model=self.claude_model,
-                        max_tokens=5000,
-                        messages=messages
-                    )
+                    # Original single message format
+                    if response_format == "json":
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": f"{prompt}\n\nPlease respond with valid JSON only."
+                            }
+                        ]
+                    else:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ]
+                
+                response = self.anthropic_client.messages.create(
+                    model=self.claude_model,
+                    max_tokens=5000,
+                    messages=messages
+                )
                 end_time = time.time()
-                print(f"Claude call took {end_time - start_time:.2f} seconds.")
+                print(f"{context} Claude call took {end_time - start_time:.2f} seconds.")
                 return response.content[0].text
             except Exception as e:
                 print(f"Error calling Claude API: {e}. Falling back to Gemini.")
@@ -274,7 +295,7 @@ class ProductService:
                 )
                 end_time = time.time()
                 model_name = "Pro" if use_pro_model else "Flash"
-                print(f"Gemini {model_name} call took {end_time - start_time:.2f} seconds.")
+                print(f"{context} Gemini {model_name} call took {end_time - start_time:.2f} seconds.")
                 return response.candidates[0].content.parts[0].text
             except Exception as e:
                 print(f"Error calling Gemini API: {e}")
@@ -333,49 +354,59 @@ class ProductService:
         Include "is_related_query": boolean in your JSON response.
         """
 
-        prompt = f"""
-        You are a helpful assistant trying to understand if a user wants to shop for apparel.
-        User's input: "{user_input}"
+        # Create cacheable prefix (static instructions + examples)
+        cacheable_prefix = f"""You are a helpful assistant trying to understand if a user wants to shop for apparel.
 
-        Analyze this input.
-        - If the input indicates interest in shopping, browsing, or learning about apparel options (e.g., "looking for a dress", "summer clothes", "what do you have?", "tell me options", "show me products", "what categories", "effortless but polished", style descriptions), then the user has shopping intent.
-        - If the input is clearly unrelated to shopping for clothes (e.g., "what's the weather?", "who made you?", "how do I cook pasta?") OR is just a greeting (e.g., "hello", "hi", "hey"), then the user does not have shopping intent.
-        - When in doubt, assume the user has shopping intent.
-        {relatedness_section}
+INTENT DETECTION RULES:
+- If the input indicates interest in shopping, browsing, or learning about apparel options (e.g., "looking for a dress", "summer clothes", "what do you have?", "tell me options", "show me products", "what categories", "effortless but polished", style descriptions), then the user has shopping intent.
+- If the input is clearly unrelated to shopping for clothes (e.g., "what's the weather?", "who made you?", "how do I cook pasta?") OR is just a greeting (e.g., "hello", "hi", "hey"), then the user does not have shopping intent.
+- When in doubt, assume the user has shopping intent.
 
-        Output ONLY a JSON object with these keys:
-        1. "has_shopping_intent": boolean (true if shopping intent is present, false otherwise).
-        2. "suggested_reply_if_no_intent": string (If `has_shopping_intent` is false, provide a polite and helpful reply to guide the user towards stating their shopping needs. If `has_shopping_intent` is true, this should be null).
-        3. "is_related_query": boolean (true if related to previous context, false if completely different, null if no previous context).
+OUTPUT FORMAT:
+Output ONLY a JSON object with these keys:
+1. "has_shopping_intent": boolean (true if shopping intent is present, false otherwise).
+2. "suggested_reply_if_no_intent": string (If `has_shopping_intent` is false, provide a polite and helpful reply to guide the user towards stating their shopping needs. If `has_shopping_intent` is true, this should be null).
+3. "is_related_query": boolean (true if related to previous context, false if completely different, null if no previous context).
 
-        Example for "looking for a summer dress":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+EXAMPLES - SHOPPING INTENT:
+"looking for a summer dress" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"what do you have?" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"tell me options" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"effortless but polished" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"casual weekend vibes" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"work clothes" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"party dress" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"something elegant" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"vacation outfits" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"show me tops" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"browse" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"shop" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+"clothes" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
 
-        Example for "what do you have?":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+EXAMPLES - NO SHOPPING INTENT:
+"what's the weather today?" → {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm a shopping assistant. Are you looking for any clothing items?", "is_related_query": null}}
+"hello" → {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "Hello! What kind of vibe are you looking for today?", "is_related_query": null}}
+"who made you?" → {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm an AI shopping assistant. What clothing items can I help you find?", "is_related_query": null}}
+"how do I cook pasta?" → {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I specialize in fashion and apparel. What clothing are you shopping for?", "is_related_query": null}}
 
-        Example for "tell me options":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+EXAMPLES - WITH PREVIOUS CONTEXT:
+Previous: "summer dresses", New: "show full sleeves only" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": true}}
+Previous: "summer dresses", New: "work tops that go with pants" → {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": false}}
+{relatedness_section}
 
-        Example for "effortless but polished":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": null}}
+TASK:"""
+        
+        # Variable part
+        variable_part = f"""
+User's input: "{user_input}"
 
-        Example for "what's the weather today?":
-        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "I'm a shopping assistant. Are you looking for any clothing items?", "is_related_query": null}}
+Analyze this input and provide the JSON response.
 
-        Example for "hello":
-        {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "Hello! What kind of vibe are you looking for today?", "is_related_query": null}}
-
-        Example with previous context - Previous: "summer dresses", New: "show full sleeves only":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": true}}
-
-        Example with previous context - Previous: "summer dresses", New: "work tops that go with pants":
-        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": false}}
-
-        JSON:
-        """
+JSON:"""
+        
+        prompt = cacheable_prefix + variable_part
         try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0, context="intent_assessment", cacheable_prefix=cacheable_prefix)
             assessment_result = _parse_llm_json_output(response_text)
             if isinstance(assessment_result, dict) and "has_shopping_intent" in assessment_result:
                 return {
@@ -415,11 +446,9 @@ class ProductService:
         4. Properly classify all final attributes as explicit or implicit
         """
 
-        prompt = f"""
-        You are a fashion expert helping update product search filters.
-        {previous_section}
-        Current user input: "{vibe_description}"
-        
+        # Create cacheable prefix (static instructions + examples + valid values)
+        cacheable_prefix = f"""You are a fashion expert helping update product search filters.
+
         Using the following examples of vibe-to-attribute mappings:
         --- VIBE EXAMPLES START ---
         {self.vibe_examples_text_content}
@@ -500,10 +529,21 @@ class ProductService:
         {{"attributes": {{"fabric": ["Lamé", "Sequined mesh"], "occasion": ["Party"]}}, "attribute_types": {{"fabric": "explicit", "occasion": "explicit"}}}}
         
         If no attributes can be confidently inferred, output: {{"attributes": {{}}, "attribute_types": {{}}}}.
+
+        Task Instructions:"""
+        
+        # Variable part (changes per request)
+        variable_part = f"""
+        {previous_section}
+        Current user input: "{vibe_description}"
+        
+        Based on the above instructions and examples, analyze the current user input and output the JSON response.
         JSON:
         """
+        
+        prompt = cacheable_prefix + variable_part
         try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=1024)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=1024, context="attribute_inference", cacheable_prefix=cacheable_prefix)
             llm_response = _parse_llm_json_output(response_text)
 
             # Expect new format with attributes and attribute_types
@@ -583,7 +623,7 @@ class ProductService:
         JSON:
         """
         try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0, context="follow_up_answer_parsing")
             llm_suggested_changes = _parse_llm_json_output(response_text)
             if isinstance(llm_suggested_changes, dict):
                 # Check if this is a clarification answer
@@ -605,66 +645,6 @@ class ProductService:
         except Exception as e:
             print(f"Error parsing user answer: {e}")
             return current_filters
-
-    def _determine_next_follow_up(self, vibe_description: str, current_filters: dict, questions_asked_history: list) -> tuple[str | None, str | None, str | None]:
-        
-        if len(questions_asked_history) >= self.MAX_FOLLOW_UP_QUESTIONS:
-            print(f"Max follow-up questions ({self.MAX_FOLLOW_UP_QUESTIONS}) reached or exceeded. Not asking another.")
-            return None, None, None
-
-        filters_for_prompt = {k: v for k, v in current_filters.items() if k != "vibe_inferred"}
-
-        prompt = f"""
-        You are a conversational shopping assistant. Product recommendations may have just been shown or are about to be shown based on current information.
-        User's initial vibe: "{vibe_description}"
-        Current known user preferences: {json.dumps(filters_for_prompt)}
-        Questions already asked (by their ID): {questions_asked_history}
-        Number of follow-up questions asked so far: {len(questions_asked_history)}. Max {self.MAX_FOLLOW_UP_QUESTIONS} follow-ups in total.
-
-        Your task: If there are still important, unclarified attributes that would significantly improve future recommendations, formulate a single, natural-sounding question to ask the user.
-        Prioritize asking about the following key aspects if they are missing or unclear from "Current known user preferences":
-        - Category (e.g., dress, top, pants)
-        - Size
-        - Budget (price range, e.g., under $100, $50-$150)
-        - Fit (e.g., relaxed, tailored)
-        - Occasion (e.g., work, casual, party)
-        - Other specific style details (e.g., Sleeve Length, Garment Length, Color/Print, Fabric type).
-        This question will be shown alongside the current product recommendations to help refine the next search.
-
-        IMPORTANT:
-        1.  Examine "Current known user preferences" and "Questions already asked" VERY CAREFULLY.
-            Do NOT ask about attributes already sufficiently covered or recently asked.
-        2.  If current preferences seem reasonably complete for good recommendations OR if all {self.MAX_FOLLOW_UP_QUESTIONS} follow-up questions have been asked,
-            indicate that no further question is needed by returning nulls.
-        3.  The question should ideally target 1-2 key missing pieces of information.
-            Example: If budget and size are still vague: "To refine this further, do you have a budget or specific size in mind?"
-            Example: If specific style details are missing: "Any other preferences, perhaps for sleeve length or fit, to narrow it down more?"
-
-        Output your decision ONLY as a JSON object with three keys: "next_question_text", "next_question_id", "attribute_key".
-        - "next_question_text": The question to ask. If no question is needed, this should be null.
-        - "next_question_id": A concise ID for the question (e.g., "ask_size_budget", "ask_style_details"). If no question, null.
-        - "attribute_key": The primary filter key(s) this question relates to (e.g., "size,price_max", "sleeve_length,fit", "category"). If no question, null.
-        
-        Example JSON if asking a question: {{"next_question_text": "Great. Any must-haves like size or a budget to keep in mind?", "next_question_id": "ask_size_budget", "attribute_key": "size,price_max"}}
-        Example JSON if no question needed: {{"next_question_text": null, "next_question_id": null, "attribute_key": null}}
-        JSON:
-        """
-        try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
-            decision = _parse_llm_json_output(response_text)
-            
-            if decision.get("next_question_text") is None:
-                return None, None, None
-            
-            if decision.get("next_question_id") and decision.get("attribute_key"):
-                 return decision.get("next_question_text"), decision.get("next_question_id"), decision.get("attribute_key")
-            else:
-                print("LLM suggested a question but was missing id or attribute_key. Treating as no question.")
-                return None, None, None
-
-        except Exception as e:
-            print(f"Error determining next follow-up: {e}")
-            return None, None, None
 
     def _build_chroma_where_clause(self, filters: dict) -> dict | None:
         where_conditions = []
@@ -751,42 +731,115 @@ class ProductService:
         return filtered_products
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
+        # Check cache first
+        cache_key = self._normalize_vibe_for_cache(vibe_description)
+        if cache_key in self.semantic_query_cache:
+            cached_query = self.semantic_query_cache[cache_key]
+            print(f"🎯 CACHE HIT: Using cached semantic query for '{vibe_description}' (key: '{cache_key}')")
+            return cached_query
+        
+        print(f"📝 CACHE MISS: Generating new semantic query for '{vibe_description}' (key: '{cache_key}')")
+        
         # Include available attribute values in the prompt
         available_values_text = ""
         if hasattr(self, 'valid_attribute_values') and self.valid_attribute_values:
             available_values_text = f"\n--- AVAILABLE ATTRIBUTE VALUES ---\n{json.dumps(self.valid_attribute_values, indent=2)}\n--- END AVAILABLE VALUES ---\n"
         
-        prompt_parts = [
+        # Create cacheable prefix (static content)
+        cacheable_parts = [
             "You are a fashion assistant. Your task is to translate a user's desired \"vibe\" into a descriptive textual query that can be used for semantic search of apparel.",
             "Use the following examples of how vibes map to product attributes as a guide:",
             "--- VIBE EXAMPLES START ---",
             self.vibe_examples_text_content,
             "--- VIBE EXAMPLES END ---",
             available_values_text,
-            f"\nUser's desired vibe: \"{vibe_description}\"",
             "\nBased on the user's vibe, the provided examples, and the available attribute values above, generate a descriptive textual query that captures the essence of this style.",
             "Be INCLUSIVE - when generating descriptions, include multiple variations that could match the vibe. Use the available attribute values as reference but don't limit yourself to only those exact terms.",
             "For elegant styles: include both sophisticated formal pieces AND elevated casual pieces, various luxurious fabrics (sequins, satin, silk, velvet, etc.), different elegant occasions (parties, dinners, events, evening wear).",
             "For casual styles: include comfortable fits, everyday fabrics, versatile pieces suitable for daily wear.",
             "Focus on the overall aesthetic feeling and style characteristics while being broad enough to match diverse interpretations of the vibe.",
             "\nFor vague inputs like 'buy', 'shop', or 'clothes', generate a broad description covering popular versatile pieces like 'casual comfortable clothing, everyday wear pieces, versatile tops and bottoms in neutral colors, suitable for multiple occasions'.",
-            "\nALWAYS generate a valid search description. Never refuse or explain why you cannot help. Output only the detailed textual description for semantic search.",
-            "Detailed Description:"
+            "\nALWAYS generate a valid search description. Never refuse or explain why you cannot help. Output only the detailed textual description for semantic search."
         ]
-        prompt = "\n".join(prompt_parts)
+        cacheable_prefix = "\n".join(cacheable_parts)
+        
+        # Variable part (changes per request)
+        variable_part = f"\n\nUser's desired vibe: \"{vibe_description}\"\n\nDetailed Description:"
+        
+        prompt = cacheable_prefix + variable_part
+        
+        refined_query = None
         try:
-            response_text = self._call_llm(prompt, response_format="text", thinking_budget=256)
+            response_text = self._call_llm(prompt, response_format="text", thinking_budget=256, context="semantic_query", cacheable_prefix=cacheable_prefix)
             if response_text:
-                llm_refined_query = response_text.strip()
-                print(f"LLM refined query: '{llm_refined_query}'")
-                return llm_refined_query
+                refined_query = response_text.strip()
+                print(f"LLM refined query: '{refined_query}'")
             else:
                 print("LLM response was empty. Falling back.")
         except Exception as e:
             print(f"LLM API call failed: {e}. Falling back.")
         
-        print(f"Falling back to original vibe description: '{vibe_description}'")
-        return vibe_description
+        if not refined_query:
+            refined_query = vibe_description
+            print(f"Falling back to original vibe description: '{refined_query}'")
+        
+        # Cache the result
+        self._cache_semantic_query(cache_key, refined_query)
+        
+        return refined_query
+    
+    def _cache_semantic_query(self, cache_key: str, semantic_query: str):
+        """Cache a semantic query with LRU-like cleanup"""
+        # Simple cache size management - remove oldest entries when limit exceeded
+        if len(self.semantic_query_cache) >= self.MAX_CACHE_ENTRIES:
+            # Remove first (oldest) entry - simple FIFO cleanup
+            oldest_key = next(iter(self.semantic_query_cache))
+            del self.semantic_query_cache[oldest_key]
+            print(f"💾 CACHE: Evicted oldest entry '{oldest_key}' to make room")
+        
+        self.semantic_query_cache[cache_key] = semantic_query
+        print(f"💾 CACHE: Stored semantic query for key '{cache_key}' (cache size: {len(self.semantic_query_cache)})")
+
+    def _normalize_vibe_for_cache(self, vibe_description: str) -> str:
+        """Normalize vibe description for cache key generation"""
+        import re
+        # Convert to lowercase and remove extra whitespace
+        normalized = vibe_description.lower().strip()
+        # Remove common stopwords that don't affect semantic meaning
+        stopwords = {'and', 'or', 'the', 'a', 'an', 'for', 'with', 'in', 'on', 'at', 'to', 'from', 'that', 'which', 'some', 'any'}
+        words = normalized.split()
+        words = [word for word in words if word not in stopwords]
+        # Sort words to handle different orderings of same concepts
+        words.sort()
+        return ' '.join(words)
+
+    def _parallel_attribute_and_semantic_calls(self, vibe_for_attributes, vibe_for_semantic, previous_context=None):
+        """Run attribute inference and semantic query generation in parallel"""
+        import time
+        start_time = time.time()
+        print(f"🚀 PARALLEL START: Starting parallel LLM calls")
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both tasks concurrently
+            if previous_context:
+                attribute_future = executor.submit(self._infer_attributes_from_vibe, vibe_for_attributes, previous_context)
+            else:
+                attribute_future = executor.submit(self._infer_attributes_from_vibe, vibe_for_attributes)
+            semantic_future = executor.submit(self._refine_query_based_on_vibe, vibe_for_semantic)
+            
+            print(f"⏱️  PARALLEL: Both tasks submitted, waiting for results...")
+            
+            # Get results (this waits for both to complete)
+            attributes_result = attribute_future.result()
+            print(f"✅ PARALLEL: Attribute inference completed")
+            semantic_result = semantic_future.result()
+            print(f"✅ PARALLEL: Semantic query completed")
+            
+            end_time = time.time()
+            total_time = end_time - start_time
+            print(f"🏁 PARALLEL COMPLETE: Total parallel execution time: {total_time:.2f} seconds")
+            
+            return attributes_result, semantic_result
 
     def _build_vector_store(self):
         if self.embedding_model is None:
@@ -844,7 +897,8 @@ class ProductService:
         except Exception as e:
             print(f"Error building ChromaDB vector store: {e}")
 
-    def _generate_justification(self, vibe_description: str, products: list, current_filters: dict, search_relaxed: bool = False) -> str:
+    def _generate_justification_with_followup(self, vibe_description: str, products: list, current_filters: dict, 
+                                            questions_asked_history: list, search_relaxed: bool = False) -> str:
 
         if not products:
             if search_relaxed:
@@ -882,6 +936,31 @@ class ProductService:
         if search_relaxed:
             relaxation_instruction = "\n\nIMPORTANT: Start your justification by mentioning that filters were relaxed to find these options (e.g., 'We relaxed your search to find...' or 'After broadening criteria...')."
 
+        # Determine if follow-up question should be included
+        follow_up_section = ""
+        if len(questions_asked_history) < self.MAX_FOLLOW_UP_QUESTIONS:
+            # Check what key attributes are missing
+            missing_attrs = []
+            if not current_filters.get("size"):
+                missing_attrs.append("size")
+            if not current_filters.get("price_max") and not current_filters.get("price_min"):
+                missing_attrs.append("budget")
+            if not current_filters.get("fit"):
+                missing_attrs.append("fit preference")
+            if not current_filters.get("occasion") and "occasion" not in [attr for attr in current_filters.get("attribute_types", {}) if current_filters["attribute_types"].get(attr) == "explicit"]:
+                missing_attrs.append("occasion")
+            
+            if missing_attrs:
+                follow_up_section = f"""
+
+OPTIONAL FOLLOW-UP: If there are still important missing attributes that would improve recommendations, you may include a natural follow-up question at the end. 
+Missing attributes that could help: {', '.join(missing_attrs)}
+Questions already asked: {questions_asked_history}
+Max {self.MAX_FOLLOW_UP_QUESTIONS} follow-ups total.
+
+If including a follow-up, format it naturally at the end like: "To refine this further, what size are you looking for?" or "Do you have a budget range in mind?"
+Only include if genuinely helpful - don't force it."""
+
         prompt = f"""The user expressed a desire for products matching the vibe: "{vibe_description}".
 Additionally, they specified the following preferences: {filter_summary if filter_summary else "no specific additional preferences"}.
 
@@ -895,18 +974,19 @@ Focus on the key attributes that align with the vibe. Be conversational and dire
 
 Example format: "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top."
 
-IMPORTANT: Keep it under 30 words. Be specific about how the products match the vibe, not generic descriptions.{relaxation_instruction}
+IMPORTANT: Keep the justification under 30 words. Be specific about how the products match the vibe, not generic descriptions.{relaxation_instruction}{follow_up_section}
 
-Justification:
+Response:
 """
         try:
-            response_text = self._call_llm(prompt, response_format="text", thinking_budget=512)
+            response_text = self._call_llm(prompt, response_format="text", thinking_budget=512, context="justification")
             return response_text.strip() if response_text else "We found some great products for you! Their styles and features should match your vibe."
         except Exception as e:
             print(f"Error generating justification: {e}")
             return "We found some great products for you! Their styles and features should match your vibe."
 
-    def converse(self, session_payload: dict) -> dict:
+    def _initialize_conversation_context(self, session_payload: dict) -> dict:
+        """Initialize and validate conversation context"""
         session_id = session_payload.get("session_id") or self._generate_session_id()
         vibe = session_payload.get("vibe_description")
         current_filters = session_payload.get("current_filters", {})
@@ -917,94 +997,122 @@ Justification:
         # Get previous vibe from backend session storage
         session_data = self._get_session_data(session_id)
         previous_vibe = session_data.get("previous_vibe")
-
-        final_response = {
+        
+        return {
             "session_id": session_id,
-            "follow_up_question": None,
-            "question_id": None,
-            "question_text_for_client": None,
-            "current_filters": dict(current_filters),
-            "questions_asked_history": list(questions_asked_history),
+            "vibe": vibe,
+            "current_filters": current_filters,
+            "user_response": user_response,
+            "last_question_text": last_question_text,
+            "questions_asked_history": questions_asked_history,
+            "previous_vibe": previous_vibe,
+            "is_follow_up": bool(user_response and last_question_text)
+        }
+
+    def _handle_follow_up_response(self, context: dict) -> dict:
+        """Handle user responses to follow-up questions"""
+        final_response = self._create_base_response(context)
+        
+        print(f"User is responding to follow-up question: '{context['last_question_text']}'. Checking shopping intent.")
+        input_to_assess = context["user_response"]
+        
+        # Check if follow-up response is related to previous context or a fresh query
+        print(f"📜 PREVIOUS: '{context['previous_vibe']}'")
+        print(f"💬 CURRENT: '{context['user_response']}'")
+        
+        intent_assessment = self._assess_shopping_intent(context["user_response"], context["previous_vibe"])
+        print(f"DEVLOG: Follow-up LLM assessment result: {intent_assessment}")
+        
+        has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
+        suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
+        is_related_query = intent_assessment.get("is_related_query", True)
+        
+        # Check if follow-up response has no shopping intent
+        if not has_shopping_intent:
+            print(f"Follow-up response '{context['user_response']}' deemed to have no shopping intent.")
+            final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
+            final_response["products"] = []
+            
+            # Check for context switch even for non-shopping follow-up responses
+            if not is_related_query:
+                # Fresh query with no shopping intent - generate new session ID
+                session_id = self._generate_session_id()
+                print(f"Generated new session ID for fresh non-shopping follow-up: {session_id}")
+                final_response["session_id"] = session_id
+                context["session_id"] = session_id
+            
+            # Update session storage even for non-shopping follow-up inputs
+            self._update_session_data(context["session_id"], context["vibe"] or input_to_assess, input_to_assess)
+            print(f"DEVLOG: Updated session storage for non-shopping follow-up - vibe: '{context['vibe'] or input_to_assess}', input: '{input_to_assess}'")
+            
+            return final_response
+        
+        print(f"Follow-up input '{input_to_assess}' has shopping intent. Proceeding with query processing.")
+        # Continue with query processing
+        return self._process_shopping_query(context, input_to_assess, is_related_query)
+
+    def _handle_initial_query(self, context: dict) -> dict:
+        """Handle initial queries (not follow-up responses)"""
+        final_response = self._create_base_response(context)
+        
+        # Determine input to assess
+        input_to_assess = context["user_response"] if context["user_response"] else context["vibe"]
+        
+        if not input_to_assess:
+            final_response["justification"] = "Hello! How can I help you find some apparel today?"
+            final_response["products"] = []
+            final_response["session_id"] = context["session_id"]
+            return final_response
+
+        # Get previous vibe for relatedness assessment
+        print(f"📜 PREVIOUS: '{context['previous_vibe']}'")
+        print(f"💬 CURRENT: '{input_to_assess}'")
+        intent_assessment = self._assess_shopping_intent(input_to_assess, context["previous_vibe"])
+        print(f"DEVLOG: LLM intent assessment result: {intent_assessment}")
+        
+        has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
+        suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
+        is_related_query = intent_assessment.get("is_related_query", None)
+
+        if not has_shopping_intent:
+            print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
+            final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
+            final_response["products"] = []
+            
+            # Check for context switch even for non-shopping intent responses
+            if not is_related_query:
+                # Fresh query with no shopping intent - generate new session ID
+                session_id = self._generate_session_id()
+                print(f"Generated new session ID for fresh non-shopping query: {session_id}")
+                final_response["session_id"] = session_id
+                context["session_id"] = session_id
+            
+            # Update session storage even for non-shopping inputs
+            self._update_session_data(context["session_id"], context["vibe"] or input_to_assess, input_to_assess)
+            print(f"DEVLOG: Updated session storage for non-shopping input - vibe: '{context['vibe'] or input_to_assess}', input: '{input_to_assess}'")
+            
+            return final_response
+        
+        print(f"Input '{input_to_assess}' has shopping intent. Proceeding with product logic.")
+        return self._process_shopping_query(context, input_to_assess, is_related_query)
+
+    def _create_base_response(self, context: dict) -> dict:
+        """Create base response structure"""
+        return {
+            "session_id": context["session_id"],
+            "current_filters": dict(context["current_filters"]),
+            "questions_asked_history": list(context["questions_asked_history"]),
             "products": None,
             "justification": None
         }
 
-        # If user is responding to a follow-up question, check intent
-        if user_response and last_question_text:
-            print(f"User is responding to follow-up question: '{last_question_text}'. Checking shopping intent.")
-            input_to_assess = user_response
-            
-            # Check if follow-up response is related to previous context or a fresh query
-            print(f"📜 PREVIOUS: '{previous_vibe}'")
-            print(f"💬 CURRENT: '{user_response}'")
-            
-            intent_assessment = self._assess_shopping_intent(user_response, previous_vibe)
-            print(f"DEVLOG: Follow-up LLM assessment result: {intent_assessment}")
-            has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
-            suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
-            is_related_query = intent_assessment.get("is_related_query", True)  # Default to related for follow-ups
-            
-            # Check if follow-up response has no shopping intent
-            if not has_shopping_intent:
-                print(f"Follow-up response '{user_response}' deemed to have no shopping intent.")
-                final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
-                final_response["products"] = []
-                
-                # Check for context switch even for non-shopping follow-up responses
-                if not is_related_query:
-                    # Fresh query with no shopping intent - generate new session ID
-                    session_id = self._generate_session_id()
-                    print(f"Generated new session ID for fresh non-shopping follow-up: {session_id}")
-                    final_response["session_id"] = session_id
-                
-                # Update session storage even for non-shopping follow-up inputs
-                self._update_session_data(session_id, vibe or input_to_assess, input_to_assess)
-                print(f"DEVLOG: Updated session storage for non-shopping follow-up - vibe: '{vibe or input_to_assess}', input: '{input_to_assess}'")
-                
-                return final_response
-        else:
-            # Only assess intent for initial interactions
-            input_to_assess = ""
-            if user_response:
-                input_to_assess = user_response
-            elif vibe:
-                input_to_assess = vibe
-            
-            if not input_to_assess:
-                final_response["justification"] = "Hello! How can I help you find some apparel today?"
-                final_response["products"] = []
-                final_response["session_id"] = session_id
-                return final_response
-
-            # Get previous vibe for relatedness assessment
-            print(f"📜 PREVIOUS: '{previous_vibe}'")
-            print(f"💬 CURRENT: '{input_to_assess}'")
-            intent_assessment = self._assess_shopping_intent(input_to_assess, previous_vibe)
-            print(f"DEVLOG: LLM intent assessment result: {intent_assessment}")
-            has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
-            suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
-            is_related_query = intent_assessment.get("is_related_query", None)
-
-            if not has_shopping_intent:
-                print(f"Input '{input_to_assess}' deemed to have no shopping intent.")
-                final_response["justification"] = suggested_reply_if_no_intent or "How can I help you find some apparel today?"
-                final_response["products"] = []
-                
-                # Check for context switch even for non-shopping intent responses
-                if not is_related_query:
-                    # Fresh query with no shopping intent - generate new session ID
-                    session_id = self._generate_session_id()
-                    print(f"Generated new session ID for fresh non-shopping query: {session_id}")
-                    final_response["session_id"] = session_id
-                
-                # Update session storage even for non-shopping inputs
-                self._update_session_data(session_id, vibe or input_to_assess, input_to_assess)
-                print(f"DEVLOG: Updated session storage for non-shopping input - vibe: '{vibe or input_to_assess}', input: '{input_to_assess}'")
-                
-                return final_response
+    def _process_shopping_query(self, context: dict, input_to_assess: str, is_related_query: bool) -> dict:
+        """Process shopping queries and execute search"""
+        final_response = self._create_base_response(context)
+        current_filters = context["current_filters"]
+        questions_asked_history = context["questions_asked_history"]
+        vibe = context["vibe"]
         
-        print(f"Input '{input_to_assess}' has shopping intent. Proceeding with product logic.")
-
         # Handle query context management - related vs fresh queries
         if is_related_query is not None:
             print(f"Query relatedness assessment: {'related' if is_related_query else 'fresh'}")
@@ -1016,36 +1124,21 @@ Justification:
                 # Generate new session ID for fresh query
                 session_id = self._generate_session_id()
                 print(f"Generated new session ID for fresh query: {session_id}")
+                context["session_id"] = session_id
+                final_response["session_id"] = session_id
                 # Update vibe to the new query (use the current input as the new vibe)
                 vibe = input_to_assess
                 print(f"Updated vibe for fresh query: '{vibe}'")
+                
+                # Process fresh query
+                processing_result = self._process_fresh_query(vibe, current_filters)
+                current_filters = processing_result["current_filters"]
             else:
                 print("Related query detected - retaining context and combining vibe.")
-                # Combine old vibe with new input for related queries - use previous_vibe from session
-                # Avoid duplicating the same vibe description
-                original_vibe = previous_vibe or vibe or ""
-                if original_vibe.strip() == input_to_assess.strip():
-                    # If the input is identical to the original vibe, don't duplicate
-                    combined_vibe = original_vibe
-                    print(f"Input identical to original vibe, using: '{combined_vibe}'")
-                else:
-                    combined_vibe = f"{original_vibe} {input_to_assess}".strip()
-                    print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{combined_vibe}'")
-                vibe = combined_vibe
-                
-                # Always do full attribute inference for consistent explicit/implicit classification
-                print(f"Doing full attribute inference for related query: '{input_to_assess}'")
-                updated_filters = self._infer_attributes_from_vibe(combined_vibe)
-                
-                # Check if this is a clarification answer
-                if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
-                    final_response["justification"] = updated_filters["__clarification_answer__"]
-                    final_response["products"] = []
-                    final_response["session_id"] = session_id
-                    return final_response
-                
-                current_filters = updated_filters
-                print(f"DEVLOG: Filters after extracting from related query: {current_filters}")
+                # Process related query
+                processing_result = self._process_related_query(context, input_to_assess)
+                vibe = processing_result["vibe"]
+                current_filters = processing_result["current_filters"]
         else:
             # When relatedness cannot be determined (no previous context), treat as fresh query
             print("No previous context available - treating as fresh query.")
@@ -1054,54 +1147,115 @@ Justification:
             # Generate new session ID for fresh query (no previous context)
             session_id = self._generate_session_id()
             print(f"Generated new session ID for fresh query (no previous context): {session_id}")
+            context["session_id"] = session_id
+            final_response["session_id"] = session_id
             vibe = input_to_assess
             print(f"Updated vibe for fresh query (no previous context): '{vibe}'")
+            
+            # Process fresh query
+            processing_result = self._process_fresh_query(vibe, current_filters)
+            current_filters = processing_result["current_filters"]
 
         if not vibe:
             final_response["justification"] = "Original vibe description is missing, cannot proceed with targeted search."
             final_response["products"] = []
-            final_response["session_id"] = session_id
+            final_response["session_id"] = context["session_id"]
             return final_response
 
-        if user_response and last_question_text:
-            print(f"📝 FOLLOW-UP ANSWER: '{user_response}' to question: '{last_question_text}'")
-            print(f"📦 PREVIOUS FILTERS: {current_filters}")
-            if vibe != user_response:  # Only log if they're actually different
-                print(f"🔗 COMBINED VIBE: '{vibe}' + '{user_response}'")
-            
-            # Always do full attribute inference for consistent explicit/implicit classification  
-            previous_context = {
-                "previous_vibe": vibe,
-                "previous_filters": current_filters
-            }
-            updated_filters = self._infer_attributes_from_vibe(user_response, previous_context)
-            
-            # Check if this is a clarification answer
-            if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
-                final_response["justification"] = updated_filters["__clarification_answer__"]
-                final_response["products"] = []
-                final_response["session_id"] = session_id
-                return final_response
-            
-            print(f"🔄 NEW FILTERS: {updated_filters}")
-            current_filters = updated_filters
+        # Handle follow-up answer processing if this was a follow-up
+        if context["user_response"] and context["last_question_text"] and context["is_follow_up"]:
+            processing_result = self._process_follow_up_answer(context, vibe, current_filters)
+            current_filters = processing_result["current_filters"]
 
-        is_first_meaningful_interaction = not questions_asked_history and \
-                                         (not current_filters or all(k in ['vibe_inferred'] for k in current_filters.keys()))
+        # Get refined semantic query from processing result
+        refined_semantic_query = processing_result["refined_semantic_query"]
+        
+        # Update context and execute search
+        final_response["current_filters"] = dict(current_filters)
+        final_response["questions_asked_history"] = list(questions_asked_history)
+        
+        return self._execute_search_and_respond(vibe, current_filters, refined_semantic_query, questions_asked_history, final_response, context)
 
+    def _process_fresh_query(self, vibe: str, current_filters: dict) -> dict:
+        """Process fresh queries - parallel attribute inference and semantic query"""
+        print(f"Processing fresh query with parallel LLM calls for vibe: {vibe}")
+        
+        is_first_meaningful_interaction = not current_filters or all(k in ['vibe_inferred'] for k in current_filters.keys())
+        
         if is_first_meaningful_interaction:
-            print(f"First interaction or minimal filters. Inferring from vibe: {vibe}")
-            inferred_from_vibe = self._infer_attributes_from_vibe(vibe)
+            inferred_from_vibe, refined_semantic_query = self._parallel_attribute_and_semantic_calls(vibe, vibe)
             if inferred_from_vibe:
                 current_filters = {**inferred_from_vibe, **current_filters} 
                 current_filters["vibe_inferred"] = True
             print(f"Filters after vibe inference: {current_filters}")
+        else:
+            # For subsequent interactions, only need semantic query
+            refined_semantic_query = self._refine_query_based_on_vibe(vibe)
         
-        final_response["current_filters"] = dict(current_filters)
-        final_response["questions_asked_history"] = list(questions_asked_history)
+        return {
+            "vibe": vibe,
+            "current_filters": current_filters,
+            "refined_semantic_query": refined_semantic_query
+        }
 
+    def _process_related_query(self, context: dict, input_to_assess: str) -> dict:
+        """Process related queries - combine with previous context"""
+        # Combine old vibe with new input for related queries
+        original_vibe = context["previous_vibe"] or context["vibe"] or ""
+        if original_vibe.strip() == input_to_assess.strip():
+            # If the input is identical to the original vibe, don't duplicate
+            combined_vibe = original_vibe
+            print(f"Input identical to original vibe, using: '{combined_vibe}'")
+        else:
+            combined_vibe = f"{original_vibe} {input_to_assess}".strip()
+            print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{combined_vibe}'")
+        
+        # Always do full attribute inference for consistent explicit/implicit classification  
+        print(f"Running parallel attribute inference and semantic query for related query: '{input_to_assess}'")
+        updated_filters, refined_semantic_query = self._parallel_attribute_and_semantic_calls(combined_vibe, combined_vibe)
+        
+        # Check if this is a clarification answer
+        if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
+            # This will be handled by the caller
+            pass
+        
+        return {
+            "vibe": combined_vibe,
+            "current_filters": updated_filters,
+            "refined_semantic_query": refined_semantic_query
+        }
+
+    def _process_follow_up_answer(self, context: dict, vibe: str, current_filters: dict) -> dict:
+        """Process follow-up answers - parallel attribute inference and semantic query"""
+        print(f"📝 FOLLOW-UP ANSWER: '{context['user_response']}' to question: '{context['last_question_text']}'")
+        print(f"📦 PREVIOUS FILTERS: {current_filters}")
+        if vibe != context["user_response"]:  # Only log if they're actually different
+            print(f"🔗 COMBINED VIBE: '{vibe}' + '{context['user_response']}'")
+        
+        # Always do full attribute inference for consistent explicit/implicit classification  
+        previous_context = {
+            "previous_vibe": vibe,
+            "previous_filters": current_filters
+        }
+        updated_filters, refined_semantic_query = self._parallel_attribute_and_semantic_calls(context["user_response"], vibe, previous_context)
+        
+        # Check if this is a clarification answer
+        if isinstance(updated_filters, dict) and "__clarification_answer__" in updated_filters:
+            # This will be handled by the caller
+            pass
+        
+        print(f"🔄 NEW FILTERS: {updated_filters}")
+        
+        return {
+            "current_filters": updated_filters,
+            "refined_semantic_query": refined_semantic_query
+        }
+
+    def _execute_search_and_respond(self, vibe: str, current_filters: dict, refined_semantic_query: str, 
+                                   questions_asked_history: list, final_response: dict, context: dict) -> dict:
+        """Execute the search and generate response with follow-up questions"""
         print(f"Proceeding to search with filters: {current_filters}")
-        refined_semantic_query = self._refine_query_based_on_vibe(vibe)
+        
         chroma_where_clause = self._build_chroma_where_clause(current_filters)
         
         print(f"DEVLOG: ChromaDB refined_semantic_query: {refined_semantic_query}")
@@ -1153,47 +1307,149 @@ Justification:
 
             # New Relaxation Strategy: Drop All Implicit Attributes at Once
             if len(final_response["products"]) < 8:
-                print(f"Initial search yielded {len(final_response['products'])} products. Starting relaxation strategy - dropping all implicit attributes at once.")
+                search_was_relaxed = self._apply_relaxation_strategy(
+                    final_response, current_filters, refined_semantic_query, top_k_initial_fetch, top_k_target
+                )
+            
+            if not final_response["products"]:
+                justification_text = self._generate_justification_with_followup(vibe, [], current_filters, questions_asked_history, search_relaxed=search_was_relaxed)
+                final_response["justification"] = justification_text
+            else:
+                final_response["justification"] = self._generate_justification_with_followup(vibe, final_response["products"], current_filters, questions_asked_history, search_relaxed=search_was_relaxed)
+
+        # Note: Follow-up questions now integrated into justification
+        # Keep questions_asked_history as is for now (can be used for tracking)
+        final_response["questions_asked_history"] = list(questions_asked_history)
+
+        # Update session storage with the final vibe used
+        self._update_session_data(context["session_id"], vibe, context.get("input_to_assess", vibe))
+        print(f"DEVLOG: Updated session storage - vibe: '{vibe}', input: '{context.get('input_to_assess', vibe)}'")
+
+        # Include session ID in response
+        final_response["session_id"] = context["session_id"]
+        return final_response
+
+    def _apply_relaxation_strategy(self, final_response: dict, current_filters: dict, refined_semantic_query: str,
+                                  top_k_initial_fetch: int, top_k_target: int) -> bool:
+        """Apply relaxation strategy to get more products"""
+        print(f"Initial search yielded {len(final_response['products'])} products. Starting relaxation strategy - dropping all implicit attributes at once.")
+        search_was_relaxed = False
+        
+        # Get attribute types from filters
+        attribute_types = current_filters.get("attribute_types", {})
+        
+        # Define relaxation order for implicit attributes (neckline dropped first)
+        implicit_relaxation_order = ['neckline', 'sleeve_length', 'length', 'fabric', 'color_or_print', 'occasion', 'fit']
+        
+        # Always keep explicit attributes and essential filters
+        always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'exclude_colors', 'vibe_inferred']
+        
+        # Start with current filters and remove all implicit attributes at once
+        temp_relaxed_filters = {k: v for k, v in current_filters.items() if k != "attribute_types"}
+        semantic_additions = []
+        
+        # Drop all implicit attributes at once
+        implicit_attributes_dropped = []
+        for attribute_to_drop in implicit_relaxation_order:
+            # Only drop if it's an implicit attribute and not in always_keep
+            if (attribute_to_drop in temp_relaxed_filters and 
+                attribute_to_drop not in always_keep and
+                attribute_types.get(attribute_to_drop) == "implicit"):
                 
-                # Get attribute types from filters
-                attribute_types = current_filters.get("attribute_types", {})
+                # Move dropped attribute to semantic search
+                dropped_value = temp_relaxed_filters[attribute_to_drop]
+                if isinstance(dropped_value, list):
+                    semantic_additions.extend([str(v) for v in dropped_value if v])
+                else:
+                    semantic_additions.append(str(dropped_value))
                 
-                # Define relaxation order for implicit attributes (neckline dropped first)
-                implicit_relaxation_order = ['neckline', 'sleeve_length', 'length', 'fabric', 'color_or_print', 'occasion', 'fit']
+                # Remove from filters
+                del temp_relaxed_filters[attribute_to_drop]
+                implicit_attributes_dropped.append((attribute_to_drop, dropped_value))
+        
+        if implicit_attributes_dropped:
+            search_was_relaxed = True
+            print(f"🔧 RELAXATION: Dropped all implicit attributes at once: {[attr for attr, _ in implicit_attributes_dropped]} → semantic search")
+            
+            # Try search with all implicit attributes relaxed
+            enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
+            print(f"Enhanced semantic query: {enhanced_query}")
+            
+            enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
+            enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
+            
+            chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
+            
+            try:
+                chroma_query_results_relaxed = self.collection.query(
+                    query_embeddings=enhanced_query_embedding_list,
+                    n_results=top_k_initial_fetch,
+                    where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
+                    include=['metadatas', 'documents', 'distances']
+                )
                 
-                # Always keep explicit attributes and essential filters
-                always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'exclude_colors', 'vibe_inferred']
+                candidate_products_relaxed = []
+                if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
+                    retrieved_ids_relaxed = set()
+                    for i in range(len(chroma_query_results_relaxed['ids'][0])):
+                        prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
+                        if prod_id_str_relaxed not in retrieved_ids_relaxed:
+                            product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
+                            if not product_series_df_relaxed.empty:
+                                product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
+                                candidate_products_relaxed.append(product_dict_relaxed)
+                                retrieved_ids_relaxed.add(prod_id_str_relaxed)
                 
-                # Start with current filters and remove all implicit attributes at once
-                temp_relaxed_filters = {k: v for k, v in current_filters.items() if k != "attribute_types"}
-                semantic_additions = []
+                final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                 
-                # Drop all implicit attributes at once
-                implicit_attributes_dropped = []
-                for attribute_to_drop in implicit_relaxation_order:
-                    # Only drop if it's an implicit attribute and not in always_keep
-                    if (attribute_to_drop in temp_relaxed_filters and 
-                        attribute_to_drop not in always_keep and
-                        attribute_types.get(attribute_to_drop) == "implicit"):
-                        
-                        # Move dropped attribute to semantic search
-                        dropped_value = temp_relaxed_filters[attribute_to_drop]
-                        if isinstance(dropped_value, list):
-                            semantic_additions.extend([str(v) for v in dropped_value if v])
-                        else:
-                            semantic_additions.append(str(dropped_value))
-                        
-                        # Remove from filters
-                        del temp_relaxed_filters[attribute_to_drop]
-                        implicit_attributes_dropped.append((attribute_to_drop, dropped_value))
-                
-                if implicit_attributes_dropped:
-                    print(f"🔧 RELAXATION: Dropped all implicit attributes at once: {[attr for attr, _ in implicit_attributes_dropped]} → semantic search")
+                if len(final_products_after_relaxed_py_filter) >= 8:
+                    print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes")
+                    # Merge results
+                    first_pass_products = final_response["products"]
+                    first_pass_ids = {p.get("id") for p in first_pass_products}
                     
-                    # Try search with all implicit attributes relaxed
+                    merged_products = first_pass_products.copy()
+                    relaxed_added = 0
+                    max_relaxed_to_add = 8 - len(first_pass_products)
+                    
+                    for product in final_products_after_relaxed_py_filter:
+                        if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
+                            merged_products.append(product)
+                            relaxed_added += 1
+                            print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
+                    
+                    final_response["products"] = merged_products[:top_k_target]
+                else:
+                    print(f"RELAXATION: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes, but need 8. Continuing to phase 2...")
+                    
+            except Exception as e:
+                print(f"Error during relaxed search: {e}")
+        
+        # Phase 2: If we still have 0 products after trying all implicit attributes, try explicit too
+        if len(final_response["products"]) == 0:
+            search_was_relaxed = True
+            print("🔧 PHASE 2: No products found, trying to drop explicit attributes")
+            
+            for attribute_to_drop in implicit_relaxation_order:
+                # Now drop explicit attributes too (except essential ones)
+                if (attribute_to_drop in temp_relaxed_filters and 
+                    attribute_to_drop not in always_keep and
+                    attribute_types.get(attribute_to_drop) == "explicit"):
+                    
+                    # Move dropped explicit attribute to semantic search
+                    dropped_value = temp_relaxed_filters[attribute_to_drop]
+                    if isinstance(dropped_value, list):
+                        semantic_additions.extend([str(v) for v in dropped_value if v])
+                    else:
+                        semantic_additions.append(str(dropped_value))
+                    
+                    # Remove from filters
+                    del temp_relaxed_filters[attribute_to_drop]
+                    
+                    print(f"🔧 EXPLICIT DROP: '{attribute_to_drop}' = {dropped_value} → semantic search")
+                    
+                    # Try search with this level of relaxation
                     enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
-                    print(f"Enhanced semantic query: {enhanced_query}")
-                    
                     enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
                     enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
                     
@@ -1221,121 +1477,28 @@ Justification:
                         
                         final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                         
-                        if len(final_products_after_relaxed_py_filter) >= 8:
-                            print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes")
-                            # Merge results
-                            first_pass_products = final_response["products"]
-                            first_pass_ids = {p.get("id") for p in first_pass_products}
-                            
-                            merged_products = first_pass_products.copy()
-                            relaxed_added = 0
-                            max_relaxed_to_add = 8 - len(first_pass_products)
-                            
-                            for product in final_products_after_relaxed_py_filter:
-                                if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
-                                    merged_products.append(product)
-                                    relaxed_added += 1
-                                    print(f"  {len(first_pass_products) + relaxed_added}. [RELAXED] {product.get('id', 'N/A')}: {product.get('name', 'N/A')}")
-                            
-                            final_response["products"] = merged_products[:top_k_target]
+                        if len(final_products_after_relaxed_py_filter) > 0:
+                            print(f"SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping explicit '{attribute_to_drop}'")
+                            final_response["products"] = final_products_after_relaxed_py_filter[:top_k_target]
+                            break
                         else:
-                            print(f"RELAXATION: Found {len(final_products_after_relaxed_py_filter)} products after dropping all implicit attributes, but need 8. Continuing to phase 2...")
+                            print(f"Still 0 products, continuing...")
                             
                     except Exception as e:
-                        print(f"Error during relaxed search: {e}")
-                
-                # If we still have 0 products after trying all implicit attributes, try explicit too
-                if len(final_response["products"]) == 0:
-                    print("🔧 PHASE 2: No products found, trying to drop explicit attributes")
-                    
-                    for attribute_to_drop in implicit_relaxation_order:
-                        # Now drop explicit attributes too (except essential ones)
-                        if (attribute_to_drop in temp_relaxed_filters and 
-                            attribute_to_drop not in always_keep and
-                            attribute_types.get(attribute_to_drop) == "explicit"):
-                            
-                            # Move dropped explicit attribute to semantic search
-                            dropped_value = temp_relaxed_filters[attribute_to_drop]
-                            if isinstance(dropped_value, list):
-                                semantic_additions.extend([str(v) for v in dropped_value if v])
-                            else:
-                                semantic_additions.append(str(dropped_value))
-                            
-                            # Remove from filters
-                            del temp_relaxed_filters[attribute_to_drop]
-                            search_was_relaxed = True
-                            
-                            print(f"🔧 EXPLICIT DROP: '{attribute_to_drop}' = {dropped_value} → semantic search")
-                            
-                            # Try search with this level of relaxation
-                            enhanced_query = f"{refined_semantic_query} {' '.join(semantic_additions)}"
-                            enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
-                            enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
-                            
-                            chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
-                            
-                            try:
-                                chroma_query_results_relaxed = self.collection.query(
-                                    query_embeddings=enhanced_query_embedding_list,
-                                    n_results=top_k_initial_fetch,
-                                    where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
-                                    include=['metadatas', 'documents', 'distances']
-                                )
-                                
-                                candidate_products_relaxed = []
-                                if chroma_query_results_relaxed and chroma_query_results_relaxed['ids'] and chroma_query_results_relaxed['ids'][0]:
-                                    retrieved_ids_relaxed = set()
-                                    for i in range(len(chroma_query_results_relaxed['ids'][0])):
-                                        prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
-                                        if prod_id_str_relaxed not in retrieved_ids_relaxed:
-                                            product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
-                                            if not product_series_df_relaxed.empty:
-                                                product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
-                                                candidate_products_relaxed.append(product_dict_relaxed)
-                                                retrieved_ids_relaxed.add(prod_id_str_relaxed)
-                                
-                                final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
-                                
-                                if len(final_products_after_relaxed_py_filter) > 0:
-                                    print(f"SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping explicit '{attribute_to_drop}'")
-                                    final_response["products"] = final_products_after_relaxed_py_filter[:top_k_target]
-                                    break
-                                else:
-                                    print(f"Still 0 products, continuing...")
-                                    
-                            except Exception as e:
-                                print(f"Error during explicit relaxed search for '{attribute_to_drop}': {e}")
-                                continue
-                
-                # Mark as relaxed if we tried any relaxation
-                if len(final_response["products"]) == 0:
-                    search_was_relaxed = True
-            
-            if not final_response["products"]:
-                justification_text = self._generate_justification(vibe, [], current_filters, search_relaxed=search_was_relaxed)
-                final_response["justification"] = justification_text
-            else:
-                final_response["justification"] = self._generate_justification(vibe, final_response["products"], current_filters, search_relaxed=search_was_relaxed)
-
-        next_q_text, next_q_id, next_q_attr_key = self._determine_next_follow_up(vibe, current_filters, questions_asked_history)
+                        print(f"Error during explicit relaxed search for '{attribute_to_drop}': {e}")
+                        continue
         
-        if next_q_text and next_q_id:
-            final_response["follow_up_question"] = next_q_text
-            final_response["question_id"] = next_q_id
-            final_response["question_text_for_client"] = next_q_text
-            final_response["questions_asked_history"] = questions_asked_history + [next_q_id]
-            print(f"Suggesting follow-up: '{next_q_text}' (ID: {next_q_id}) alongside results.")
+        return search_was_relaxed
+
+    def converse(self, session_payload: dict) -> dict:
+        """Main entry point for conversation processing - now clean and modular!"""
+        # 1. Initialize and validate conversation context
+        context = self._initialize_conversation_context(session_payload)
+        
+        # 2. Route to appropriate handler based on conversation type
+        if context["is_follow_up"]:
+            return self._handle_follow_up_response(context)
         else:
-            print("No further follow-up question suggested or limit reached.")
-            final_response["questions_asked_history"] = list(questions_asked_history)
-
-        # Update session storage with the final vibe used
-        self._update_session_data(session_id, vibe, input_to_assess)
-        print(f"DEVLOG: Updated session storage - vibe: '{vibe}', input: '{input_to_assess}'")
-
-        # Include session ID in response
-        final_response["session_id"] = session_id
-
-        return final_response
+            return self._handle_initial_query(context)
 
 product_service_instance = ProductService()
