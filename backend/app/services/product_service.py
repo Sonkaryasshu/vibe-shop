@@ -11,6 +11,7 @@ import uuid
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 # Fix HuggingFace tokenizers warning in Flask/threading environment
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -691,7 +692,7 @@ JSON:"""
             print(f"Error parsing user answer: {e}")
             return current_filters
 
-    def _build_chroma_where_clause(self, filters: dict) -> dict | None:
+    def _build_chroma_where_clause(self, filters: dict) -> Optional[dict]:
         where_conditions = []
         processed_keys = set()
 
