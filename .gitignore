@@ -167,4 +167,3 @@ cython_debug/
 
 # ChromaDB persistence (if used locally)
 chroma_db/
-backend/chroma_db/
