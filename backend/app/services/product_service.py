@@ -17,8 +17,9 @@ from typing import Optional
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
-APPAREL_DATA_PATH = os.path.join(DATA_DIR, 'Apparels_shared.csv')
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'chroma_db')
 VIBE_EXAMPLES_PATH = os.path.join(DATA_DIR, 'vibe_to_attribute_examples.txt')
+VALID_ATTRIBUTES_PATH = os.path.join(DATA_DIR, 'valid_attribute_values.json')
 
 def _parse_llm_json_output(llm_text_response: str, logger=None) -> dict:
     if logger is None:
@@ -42,13 +43,10 @@ def _parse_llm_json_output(llm_text_response: str, logger=None) -> dict:
 
 class ProductService:
     def __init__(self):
-        self.products_df = None
         self.vibe_examples_text_content = ""
         self.embedding_model = None
         self.chroma_client = None
         self.collection = None
-        self.product_ids_list = []
-        self.product_descriptions = []
         self.gemini_client = None
         self.gemini_pro_model = None
         self.gemini_flash_model = None
@@ -122,69 +120,23 @@ class ProductService:
             self.openai_client = None
         
         try:
-            self.chroma_client = chromadb.Client()
-            self.collection = self.chroma_client.get_or_create_collection(name="apparel_products")
-            print("Successfully initialized ChromaDB client and collection.")
+            if not os.path.exists(DB_PATH):
+                print(f"FATAL: ChromaDB database not found at {DB_PATH}. Please run `python backend/build_db.py` first.")
+                self.chroma_client = None
+                self.collection = None
+            else:
+                self.chroma_client = chromadb.PersistentClient(path=DB_PATH)
+                self.collection = self.chroma_client.get_collection(name="apparel_products")
+                print(f"Successfully connected to persistent ChromaDB at '{DB_PATH}' with {self.collection.count()} items.")
         except Exception as e:
-            print(f"Error initializing ChromaDB: {e}")
+            print(f"Error initializing ChromaDB from path '{DB_PATH}': {e}")
             self.chroma_client = None
             self.collection = None
 
         self._load_data()
-        if self.products_df is not None and not self.products_df.empty and self.collection is not None and self.embedding_model is not None:
-            self._build_vector_store()
 
     def _load_data(self):
         try:
-            if os.path.exists(APPAREL_DATA_PATH):
-                self.products_df = pd.read_csv(APPAREL_DATA_PATH)
-                self.products_df = self.products_df.fillna('')
-                
-                # Trim whitespace and special characters from string columns
-                string_cols = ['category', 'fit', 'fabric', 'sleeve_length', 'color_or_print', 
-                              'occasion', 'neckline', 'length', 'pant_type', 'name', 'description']
-                for col in string_cols:
-                    if col in self.products_df.columns:
-                        # Remove leading/trailing whitespace, NBSP, and other special whitespace chars
-                        self.products_df[col] = (self.products_df[col].astype(str)
-                                               .str.replace('\u00A0', ' ', regex=False)  # NBSP to regular space
-                                               .str.replace('\u2000', ' ', regex=False)  # EN quad
-                                               .str.replace('\u2001', ' ', regex=False)  # EM quad
-                                               .str.replace('\u2002', ' ', regex=False)  # EN space
-                                               .str.replace('\u2003', ' ', regex=False)  # EM space
-                                               .str.replace('\u2004', ' ', regex=False)  # 3-per-EM space
-                                               .str.replace('\u2005', ' ', regex=False)  # 4-per-EM space
-                                               .str.replace('\u2006', ' ', regex=False)  # 6-per-EM space
-                                               .str.replace('\u2007', ' ', regex=False)  # Figure space
-                                               .str.replace('\u2008', ' ', regex=False)  # Punctuation space
-                                               .str.replace('\u2009', ' ', regex=False)  # Thin space
-                                               .str.replace('\u200A', ' ', regex=False)  # Hair space
-                                               .str.replace('\u200B', '', regex=False)   # Zero-width space
-                                               .str.replace('\u200C', '', regex=False)   # Zero-width non-joiner
-                                               .str.replace('\u200D', '', regex=False)   # Zero-width joiner
-                                               .str.replace('\uFEFF', '', regex=False)   # Zero-width no-break space (BOM)
-                                               .str.strip())
-                print(f"Successfully loaded {len(self.products_df)} products from {APPAREL_DATA_PATH}")
-
-                description_cols = ['name', 'category', 'fit', 'fabric', 'sleeve_length',
-                                    'color_or_print', 'occasion', 'neckline', 'length', 'pant_type', 'description']
-                for index, row in self.products_df.iterrows():
-                    desc_parts = [str(row[col]) for col in description_cols if col in row and pd.notna(row[col]) and str(row[col]).strip() != '']
-                    description = f"{row.get('name', '')} is a {row.get('category', '')}. "
-                    description += ". ".join(desc_parts[2:])
-                    description = description.replace("..", ".").strip()
-                    if description and description != ".":
-                        self.product_descriptions.append(description)
-                        self.product_ids_list.append(str(row['id']))
-                    else:
-                        default_desc = f"{row.get('name', 'Product')} {row.get('category', '')}".strip()
-                        self.product_descriptions.append(default_desc if default_desc else "Unknown Product")
-                        self.product_ids_list.append(str(row['id']))
-
-            else:
-                print(f"Warning: Product data file not found at {APPAREL_DATA_PATH}. ProductService will operate with no product data.")
-                self.products_df = pd.DataFrame()
-
             if os.path.exists(VIBE_EXAMPLES_PATH):
                 with open(VIBE_EXAMPLES_PATH, 'r', encoding='utf-8') as f:
                     self.vibe_examples_text_content = f.read()
@@ -193,22 +145,16 @@ class ProductService:
                 print(f"Warning: Vibe examples file not found at {VIBE_EXAMPLES_PATH}.")
                 self.vibe_examples_text_content = ""
 
-            if self.products_df is not None and not self.products_df.empty:
-                attributes_to_get_values_for = [
-                    'category', 'fit', 'fabric', 'sleeve_length', 
-                    'color_or_print', 'occasion', 'neckline', 'length', 'pant_type'
-                ]
-                for attr in attributes_to_get_values_for:
-                    if attr in self.products_df.columns:
-                        unique_values = self.products_df[attr].dropna().astype(str).str.strip().unique()
-                        self.valid_attribute_values[attr] = sorted([val for val in unique_values if val])
-                print(f"Loaded valid attribute values: {json.dumps(self.valid_attribute_values, indent=2)}")
-
+            if os.path.exists(VALID_ATTRIBUTES_PATH):
+                with open(VALID_ATTRIBUTES_PATH, 'r', encoding='utf-8') as f:
+                    self.valid_attribute_values = json.load(f)
+                print(f"Successfully loaded valid attributes from {VALID_ATTRIBUTES_PATH}")
+            else:
+                print(f"Warning: Valid attributes file not found at {VALID_ATTRIBUTES_PATH}. In-context filtering will be impaired.")
+                self.valid_attribute_values = {}
 
         except Exception as e:
             print(f"Error loading data: {e}")
-            if self.products_df is None:
-                 self.products_df = pd.DataFrame()
             if not self.vibe_examples_text_content:
                 self.vibe_examples_text_content = ""
             if not hasattr(self, 'valid_attribute_values') or not self.valid_attribute_values:
@@ -887,62 +833,6 @@ JSON:"""
             
             return attributes_result, semantic_result
 
-    def _build_vector_store(self):
-        if self.embedding_model is None:
-            print("Error: Embedding model not loaded. Cannot build vector store.")
-            return
-        if self.collection is None:
-            print("Error: ChromaDB collection not initialized. Cannot build vector store.")
-            return
-        if self.products_df is None or self.products_df.empty:
-            print("Warning: Product data is empty. Cannot build vector store.")
-            return
-        if not self.product_descriptions or not self.product_ids_list:
-            print("Warning: No product descriptions or IDs available to build vector store.")
-            return
-        if len(self.product_descriptions) != len(self.product_ids_list):
-            print("Error: Mismatch between number of descriptions and product IDs. Cannot build vector store.")
-            return
-
-        try:
-            print(f"Generating embeddings for {len(self.product_descriptions)} product descriptions...")
-            embeddings = self.embedding_model.encode(self.product_descriptions, show_progress_bar=True)
-            embeddings_np = np.array(embeddings, dtype=np.float32).tolist()
-
-            print(f"Building metadata for {len(self.product_ids_list)} products...")
-            metadatas = []
-            for product_id_str in self.product_ids_list:
-                product_data = self.products_df[self.products_df['id'] == product_id_str].iloc[0]
-                meta = {
-                    "product_id": product_id_str,
-                    "name": str(product_data.get('name', '')),
-                    "category": str(product_data.get('category', '')),
-                    "price": float(product_data.get('price', 0.0)),
-                    "fit": str(product_data.get('fit', '')),
-                    "fabric": str(product_data.get('fabric', '')),
-                    "sleeve_length": str(product_data.get('sleeve_length', '')),
-                    "color_or_print": str(product_data.get('color_or_print', '')),
-                    "occasion": str(product_data.get('occasion', '')),
-                    "neckline": str(product_data.get('neckline', '')),
-                    "length": str(product_data.get('length', '')),
-                    "pant_type": str(product_data.get('pant_type', '')),
-                    "available_sizes": str(product_data.get('available_sizes', '')),
-                    "description": str(product_data.get('description', ''))
-                }
-                metadatas.append(meta)
-            
-            print(f"Adding {len(self.product_ids_list)} items to ChromaDB collection...")
-            self.collection.add(
-                embeddings=embeddings_np,
-                documents=self.product_descriptions,
-                metadatas=metadatas,
-                ids=self.product_ids_list
-            )
-            print(f"Successfully built ChromaDB collection with {self.collection.count()} vectors.")
-
-        except Exception as e:
-            print(f"Error building ChromaDB vector store: {e}")
-
     def _generate_justification_with_followup(self, vibe_description: str, products: list, current_filters: dict, 
                                             questions_asked_history: list, search_relaxed: bool = False) -> str:
 
@@ -1330,11 +1220,9 @@ Response:
                     for i in range(len(chroma_query_results['ids'][0])):
                         prod_id_str = chroma_query_results['ids'][0][i]
                         if prod_id_str not in retrieved_ids:
-                            product_series_df = self.products_df[self.products_df['id'] == prod_id_str]
-                            if not product_series_df.empty:
-                                product_dict = product_series_df.iloc[0].to_dict()
-                                candidate_products.append(product_dict)
-                                retrieved_ids.add(prod_id_str)
+                            product_dict = chroma_query_results['metadatas'][0][i]
+                            candidate_products.append(product_dict)
+                            retrieved_ids.add(prod_id_str)
                 
                 final_products_after_py_filter = self._apply_python_filters(candidate_products, current_filters)
                 
@@ -1440,11 +1328,9 @@ Response:
                     for i in range(len(chroma_query_results_relaxed['ids'][0])):
                         prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
                         if prod_id_str_relaxed not in retrieved_ids_relaxed:
-                            product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
-                            if not product_series_df_relaxed.empty:
-                                product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
-                                candidate_products_relaxed.append(product_dict_relaxed)
-                                retrieved_ids_relaxed.add(prod_id_str_relaxed)
+                            product_dict_relaxed = chroma_query_results_relaxed['metadatas'][0][i]
+                            candidate_products_relaxed.append(product_dict_relaxed)
+                            retrieved_ids_relaxed.add(prod_id_str_relaxed)
                 
                 final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                 
@@ -1515,11 +1401,9 @@ Response:
                             for i in range(len(chroma_query_results_relaxed['ids'][0])):
                                 prod_id_str_relaxed = chroma_query_results_relaxed['ids'][0][i]
                                 if prod_id_str_relaxed not in retrieved_ids_relaxed:
-                                    product_series_df_relaxed = self.products_df[self.products_df['id'] == prod_id_str_relaxed]
-                                    if not product_series_df_relaxed.empty:
-                                        product_dict_relaxed = product_series_df_relaxed.iloc[0].to_dict()
-                                        candidate_products_relaxed.append(product_dict_relaxed)
-                                        retrieved_ids_relaxed.add(prod_id_str_relaxed)
+                                    product_dict_relaxed = chroma_query_results_relaxed['metadatas'][0][i]
+                                    candidate_products_relaxed.append(product_dict_relaxed)
+                                    retrieved_ids_relaxed.add(prod_id_str_relaxed)
                         
                         final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
                         
