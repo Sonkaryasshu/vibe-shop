@@ -15,7 +15,7 @@ def _load_and_process_data():
     """Loads and processes apparel data from CSV."""
     try:
         if os.path.exists(APPAREL_DATA_PATH):
-            products_df = pd.read_csv(APPAREL_DATA_PATH)
+            products_df = pd.read_csv(APPAREL_DATA_PATH, dtype={'id': str})
             products_df = products_df.fillna('')
             
             string_cols = ['category', 'fit', 'fabric', 'sleeve_length', 'color_or_print', 
@@ -83,7 +83,7 @@ def build_vector_store(products_df, product_descriptions, product_ids_list):
         print(f"Building metadata for {len(product_ids_list)} products...")
         metadatas = []
         for product_id_str in product_ids_list:
-            product_data = products_df[products_df['id'] == int(product_id_str)].iloc[0]
+            product_data = products_df[products_df['id'] == product_id_str].iloc[0]
             meta = {
                 "product_id": product_id_str,
                 "id": product_id_str,
