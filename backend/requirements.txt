@@ -6,5 +6,6 @@ sentence-transformers # For generating embeddings
 chromadb # Using ChromaDB for vector store
 google-genai # For Gemini API with thinking budget support
 anthropic # For Claude API
+openai # For OpenAI API
 numpy # For numerical operations, especially with embeddings
 # We will add more libraries like faiss-gpu if needed later

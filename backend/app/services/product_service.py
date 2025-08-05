@@ -6,6 +6,7 @@ import chromadb
 from google import genai
 from google.genai import types
 from anthropic import Anthropic
+from openai import OpenAI
 import uuid
 import json
 import time
@@ -52,6 +53,9 @@ class ProductService:
         self.gemini_flash_model = None
         self.anthropic_client = None
         self.claude_model = None
+        self.openai_client = None
+        self.openai_model = None
+        self.use_openai = False
         self.use_claude = False  # Toggle between Gemini and Claude
         self.MAX_FOLLOW_UP_QUESTIONS = 2
         self.valid_attribute_values = {}
@@ -92,7 +96,7 @@ class ProductService:
             if anthropic_api_key:
                 self.anthropic_client = Anthropic(api_key=anthropic_api_key)
                 self.claude_model = "claude-sonnet-4-20250514"
-                self.use_claude = True  # Use Claude by default
+                self.use_claude = True
                 print(f"Successfully configured Anthropic API with model: {self.claude_model}. Use Claude: {self.use_claude}")
             else:
                 print("Warning: ANTHROPIC_API_KEY environment variable not found. Claude LLM features will be disabled.")
@@ -100,6 +104,21 @@ class ProductService:
         except Exception as e:
             print(f"Error configuring Anthropic API: {e}")
             self.anthropic_client = None
+        
+        # Initialize OpenAI
+        try:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if openai_api_key:
+                self.openai_client = OpenAI(api_key=openai_api_key)
+                self.openai_model = "gpt-4o"
+                self.use_openai = True
+                print(f"Successfully configured OpenAI API with model: {self.openai_model}. Use OpenAI: {self.use_openai}")
+            else:
+                print("Warning: OPENAI_API_KEY environment variable not found. OpenAI LLM features will be disabled.")
+                self.openai_client = None
+        except Exception as e:
+            print(f"Error configuring OpenAI API: {e}")
+            self.openai_client = None
         
         try:
             self.chroma_client = chromadb.Client()
@@ -220,6 +239,32 @@ class ProductService:
                 print(f"Error calling Gemini Pro API: {e}. Falling back to Claude.")
                 # Fall back to Claude if Gemini Pro fails
         
+        if self.use_openai and self.openai_client:
+            try:
+                start_time = time.time()
+                
+                messages = [{"role": "user", "content": prompt}]
+                
+                request_params = {
+                    "model": self.openai_model,
+                    "messages": messages,
+                    "max_tokens": 4096,
+                }
+                
+                if response_format == "json":
+                    request_params["response_format"] = {"type": "json_object"}
+                    # Add instruction to prompt for JSON output
+                    request_params["messages"] = [{"role": "user", "content": f"{prompt}\n\nPlease respond with valid JSON only."}]
+
+                response = self.openai_client.chat.completions.create(**request_params)
+                
+                end_time = time.time()
+                print(f"{context} OpenAI call took {end_time - start_time:.2f} seconds.")
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"Error calling OpenAI API: {e}. Falling back to other models.")
+                # Fallback will happen by continuing execution
+
         if self.use_claude and self.anthropic_client:
             try:
                 start_time = time.time()
@@ -301,7 +346,7 @@ class ProductService:
                 print(f"Error calling Gemini API: {e}")
                 return ""
         
-        print("No LLM client available (neither Claude nor Gemini).")
+        print("No LLM client available (neither OpenAI, Claude nor Gemini).")
         return ""
 
     def _get_session_data(self, session_id: str) -> dict:
