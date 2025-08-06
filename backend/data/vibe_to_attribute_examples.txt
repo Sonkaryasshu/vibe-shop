@@ -46,6 +46,11 @@
         "color_or_print": "Geometric print",
     }
 
+    "tops without patterns": {
+        "attributes": {"category": ["top"]},
+        "excluded_attributes": {"color_or_print": ["floral", "stripe", "print", "pattern", "geometric"]}
+    },
+
     "pastel": {"color_or_print": ["pastel pink", "pastel yellow"]}
     "floral": {"color_or_print": "floral print"}
     "bold": {"color_or_print": ["ruby red", "cobalt blue"]}

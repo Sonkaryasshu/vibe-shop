@@ -439,9 +439,13 @@ class ProductService:
         
         IMPORTANT: Pay special attention to specific attribute requirements:
         - If the vibe mentions "sleeveless", ensure you infer sleeve_length attribute with the exact value "Sleeveless" (match the VALID ATTRIBUTE VALUES)
-        - If the vibe mentions "no black" or "no blue", create exclusion filters using "exclude_colors" key with the colors to exclude
+        - If the vibe mentions "no black" or "no blue", create exclusion filters. See below.
         - If the vibe mentions "full sleeves" or "long sleeves", use the appropriate sleeve_length value from VALID ATTRIBUTE VALUES
         - If the vibe mentions multiple categories like "tops and dresses", include both in the category array
+
+        For negations (e.g., "no black", "not sleeveless", "without patterns"):
+        - Create an `excluded_attributes` object. Keys are attribute names (e.g., 'color_or_print'), and values are arrays of strings to exclude.
+        - For these exclusions, try to use values from the `VALID ATTRIBUTE VALUES` list. For example, for "no patterns", you might infer `{"color_or_print": ["Floral", "Striped", "Geometric"]}`.
         
         For price:
         - If the vibe mentions a maximum (e.g., 'under $100', 'less than $100'), use 'price_max'.
@@ -458,9 +462,10 @@ class ProductService:
         - EXPLICIT: User directly mentioned this attribute (e.g., "red dress", "work clothes", "size M", "under $100", "sleeveless", "linen tops")
         - IMPLICIT: You inferred this attribute based on the general vibe (e.g., inferring "Cotton" for "summer casual", inferring "Party" occasion for "date night")
         
-        Output your answer as a JSON object with two sections:
-        1. "attributes": regular attribute values
-        2. "attribute_types": mapping of each attribute to "explicit" or "implicit"
+        Output your answer as a JSON object with three sections:
+        1. "attributes": regular attribute values.
+        2. "attribute_types": mapping of each attribute to "explicit" or "implicit".
+        3. "excluded_attributes": an object where keys are attribute names and values are arrays of strings to exclude (e.g., `{{"color_or_print": ["black", "blue"]}}`).
         
         Examples using real attribute values from our catalog:
         
@@ -498,20 +503,24 @@ class ProductService:
         {{"attributes": {{"category": ["dress"], "occasion": ["Party"], "color_or_print": ["Red"], "price_max": 100}}, "attribute_types": {{"category": "explicit", "occasion": "implicit", "color_or_print": "explicit", "price_max": "explicit"}}}}
         
         Vibe: "shimmery metallic fabric for party"
-        {{"attributes": {{"fabric": ["Lamé", "Sequined mesh"], "occasion": ["Party"]}}, "attribute_types": {{"fabric": "explicit", "occasion": "explicit"}}}}
+        {{"attributes": {{"fabric": ["Lamé", "Sequined mesh"], "occasion": ["Party"]}}, "excluded_attributes": {{}}, "attribute_types": {{"fabric": "explicit", "occasion": "explicit"}}}}
+
+        Vibe: "tops but not sleeveless"
+        {{"attributes": {{"category": ["top"]}}, "excluded_attributes": {{"sleeve_length": ["Sleeveless"]}}, "attribute_types": {{"category": "implicit", "sleeve_length": "explicit"}}}}
         
-        If no attributes can be confidently inferred, output: {{"attributes": {{}}, "attribute_types": {{}}}}.
+        If no attributes can be confidently inferred, output: {{"attributes": {{}}, "excluded_attributes": {{}}, "attribute_types": {{}}}}.
         JSON:
         """
         try:
             response_text = self._call_llm(prompt, response_format="json", thinking_budget=1024)
             llm_response = _parse_llm_json_output(response_text)
 
-            # Expect new format with attributes and attribute_types
+            # Expect new format with attributes, attribute_types, and excluded_attributes
             inferred_attributes = llm_response.get("attributes", {})
             attribute_types = llm_response.get("attribute_types", {})
+            excluded_attributes = llm_response.get("excluded_attributes", {})
 
-            if inferred_attributes and self.valid_attribute_values:
+            if (inferred_attributes or excluded_attributes) and self.valid_attribute_values:
                 validated_attributes = {}
                 validated_attribute_types = {}
                 
@@ -530,17 +539,23 @@ class ProductService:
                     else:
                         validated_attributes[key] = value
                         validated_attribute_types[key] = attribute_types.get(key, "implicit")
+
+                if excluded_attributes:
+                    validated_attributes["excluded_attributes"] = excluded_attributes
                 
                 # Add attribute_types to the result
                 if validated_attribute_types:
                     validated_attributes["attribute_types"] = validated_attribute_types
                 
                 print(f"🎯 INFERRED ATTRIBUTES: {inferred_attributes}")
+                print(f"🚫 EXCLUDED ATTRIBUTES: {excluded_attributes}")
                 print(f"📋 EXPLICIT/IMPLICIT TYPES: {attribute_types}")
                 print(f"✅ VALIDATED FILTERS: {validated_attributes}")
                 return validated_attributes
             else:
                 result = {"attribute_types": attribute_types} if attribute_types else {}
+                if "excluded_attributes" in llm_response:
+                    result["excluded_attributes"] = llm_response.get("excluded_attributes")
                 return result
 
         except Exception as e:
@@ -558,16 +573,35 @@ class ProductService:
             where_conditions.append({"price": {"$gte": float(filters["price_min"])}})
         elif "price_max" in filters and filters["price_max"] is not None:
             where_conditions.append({"price": {"$lte": float(filters["price_max"])}})
-        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "exclude_colors", "attribute_types"])
+        processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "attribute_types", "excluded_attributes"])
 
+        # Handle size filter
+        user_sizes_str = filters.get("size")
+        if user_sizes_str:
+            user_s_list = []
+            if isinstance(user_sizes_str, list):
+                user_s_list = [s.strip().upper() for s in user_sizes_str]
+            elif isinstance(user_sizes_str, str):
+                user_s_list = [s.strip().upper() for s in user_sizes_str.split(',')]
+            
+            if user_s_list:
+                # Check if any of the user-specified sizes are present in the product's available_sizes list
+                size_or_clauses = [{"available_sizes": {"$contains": size}} for size in user_s_list]
+                if size_or_clauses:
+                    where_conditions.append({"$or": size_or_clauses})
+        
+        processed_keys.add("size")
+
+        # Handle excluded attributes using $nin
+        if "excluded_attributes" in filters and filters["excluded_attributes"]:
+            for key, value in filters["excluded_attributes"].items():
+                if value:
+                    where_conditions.append({key: {"$nin": value}})
 
         for key, value in filters.items():
             if key in processed_keys or value is None or value == "" or (isinstance(value, list) and not value):
                 continue
             
-            if key == "size":
-                continue
-
             if isinstance(value, list):
                 if len(value) == 1:
                      where_conditions.append({key: {"$eq": str(value[0])}})
@@ -582,55 +616,6 @@ class ProductService:
         if len(where_conditions) == 1:
             return where_conditions[0]
         return {"$and": where_conditions}
-
-    def _apply_python_filters(self, products: list, filters: dict) -> list:
-        filtered_products = products
-
-        user_sizes_str = filters.get("size")
-        if user_sizes_str:
-            user_s_list = []
-            if isinstance(user_sizes_str, list):
-                user_s_list = [s.strip().upper() for s in user_sizes_str]
-            elif isinstance(user_sizes_str, str):
-                user_s_list = [s.strip().upper() for s in user_sizes_str.split(',')]
-            
-            if user_s_list:
-                temp_products = []
-                for product in filtered_products:
-                    available_sizes_product = product.get("available_sizes", "")
-                    if available_sizes_product and isinstance(available_sizes_product, str):
-                        product_s_list = {s.strip().upper() for s in available_sizes_product.split(',')}
-                        if any(size_filter in product_s_list for size_filter in user_s_list):
-                            temp_products.append(product)
-                filtered_products = temp_products
-        
-        # Handle color exclusions with string matching
-        exclude_colors = filters.get("exclude_colors")
-        if exclude_colors:
-            exclude_colors_list = []
-            if isinstance(exclude_colors, list):
-                exclude_colors_list = [color.strip().lower() for color in exclude_colors]
-            elif isinstance(exclude_colors, str):
-                exclude_colors_list = [exclude_colors.strip().lower()]
-            
-            if exclude_colors_list:
-                temp_products = []
-                for product in filtered_products:
-                    color_or_print = product.get("color_or_print", "").lower()
-                    # Check if any excluded color appears in the color_or_print field
-                    if not any(excluded_color in color_or_print for excluded_color in exclude_colors_list):
-                        temp_products.append(product)
-                filtered_products = temp_products
-        
-        price_min = filters.get("price_min")
-        price_max = filters.get("price_max")
-
-        if price_min is not None:
-            filtered_products = [p for p in filtered_products if p.get("price", float('inf')) >= float(price_min)]
-        if price_max is not None:
-            filtered_products = [p for p in filtered_products if p.get("price", float('-inf')) <= float(price_max)]
-
-        return filtered_products
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
         prompt_parts = [
@@ -702,7 +687,7 @@ class ProductService:
                     "neckline": str(product_data.get('neckline', '')),
                     "length": str(product_data.get('length', '')),
                     "pant_type": str(product_data.get('pant_type', '')),
-                    "available_sizes": str(product_data.get('available_sizes', '')),
+                    "available_sizes": [s.strip().upper() for s in str(product_data.get('available_sizes', '')).split(',') if s.strip()],
                     "description": str(product_data.get('description', ''))
                 }
                 metadatas.append(meta)
@@ -1066,7 +1051,8 @@ class ProductService:
                                 candidate_products.append(product_dict)
                                 retrieved_ids.add(prod_id_str)
                 
-                final_products_after_py_filter = self._apply_python_filters(candidate_products, current_filters)
+                # Python-based filtering is no longer needed, handled by ChromaDB where clause.
+                final_products_after_py_filter = candidate_products
                 
                 if final_products_after_py_filter:
                     final_response["products"] = final_products_after_py_filter[:top_k_target]
@@ -1145,7 +1131,8 @@ class ProductService:
                                             candidate_products_relaxed.append(product_dict_relaxed)
                                             retrieved_ids_relaxed.add(prod_id_str_relaxed)
                             
-                            final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
+                            # Python-based filtering is no longer needed
+                            final_products_after_relaxed_py_filter = candidate_products_relaxed
                             
                             if len(final_products_after_relaxed_py_filter) >= 3:
                                 print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping '{attribute_to_drop}'")
@@ -1222,7 +1209,8 @@ class ProductService:
                                                 candidate_products_relaxed.append(product_dict_relaxed)
                                                 retrieved_ids_relaxed.add(prod_id_str_relaxed)
                                 
-                                final_products_after_relaxed_py_filter = self._apply_python_filters(candidate_products_relaxed, temp_relaxed_filters)
+                                # Python-based filtering is no longer needed
+                                final_products_after_relaxed_py_filter = candidate_products_relaxed
                                 
                                 if len(final_products_after_relaxed_py_filter) > 0:
                                     print(f"SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping explicit '{attribute_to_drop}'")
