@@ -4,7 +4,7 @@
     },
 
     "comfy lounge tees": {
-        "fit": "relaxed",
+        "fit": "Relaxed",
         "sleeve_length": "Short sleeves"
     },
 
@@ -42,32 +42,31 @@
     "dresses for retro 70s look": {
         "fit": "Body hugging",
         "fabric": "Stretch crepe",
-        "sleeve_length": "Cap sleeves",
-        "color_or_print": "Geometric print",
-    }
+        "sleeve_length": "Cap sleeves"
+    },
 
     "tops without patterns": {
         "attributes": {"category": ["top"]},
-        "excluded_attributes": {"color_or_print": ["floral", "stripe", "print", "pattern", "geometric"]}
+        "excluded_attributes": {"color_or_print": ["Floral print", "Charcoal pinstripe", "Emerald green grid check", "Multicolor mosaic print"]}
     },
 
-    "pastel": {"color_or_print": ["pastel pink", "pastel yellow"]}
-    "floral": {"color_or_print": "floral print"}
-    "bold": {"color_or_print": ["ruby red", "cobalt blue"]}
-    "neutral": {"color_or_print": ["sand beige", "off-white", "white"]}
+    "pastel": {"color_or_print": ["Pastel pink", "Pastel yellow"]},
+    "floral": {"color_or_print": "Floral print"},
+    "bold": {"color_or_print": ["Ruby red", "Cobalt blue"]},
+    "neutral": {"color_or_print": ["Sand beige", "Off-white"]},
 
-    "flowy": {"fit": "relaxed"}
-    "bodycon": {"fit": "body hugging"}
+    "flowy": {"fit": "Flowy"},
+    "bodycon": {"fit": "Body hugging"},
 
-    "breathable / summer": {"fabric": "linen"}
-    "luxurious / party": {"fabric": "velvet"}
-    "metallic / party": {"fabric": "lamé"}
+    "breathable or summer": {"fabric": "Linen"},
+    "luxurious or party": {"fabric": "Velvet"},
+    "metallic or party": {"fabric": "Lamé"},
 
     "sleek":  {"fit": "Slim"},
-    "retro '70's flare vibe":  {"fit": "Sleek and straight", "type": "Flared"}
+    "retro '70's flare vibe":  {"fit": "Sleek and straight", "pant_type": "Flared"},
 
-    "gym tshirts" / "workout top": {
-        "category": ["T-shirt", "Top"],
-        "fabric": ["Cotton", "Polyester blend", "Performance fabric"],
-        "fit": ["relaxed", "Regular"]
+    "gym tshirts or workout top": {
+        "category": ["top"],
+        "fabric": ["Cotton"],
+        "fit": ["Relaxed"]
     }

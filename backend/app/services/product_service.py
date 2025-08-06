@@ -148,6 +148,14 @@ class ProductService:
                     description = f"{row.get('name', '')} is a {row.get('category', '')}. "
                     description += ". ".join(desc_parts[2:])
                     description = description.replace("..", ".").strip()
+                    
+                    # Add available sizes as searchable tokens to the description
+                    sizes_str = str(row.get('available_sizes', ''))
+                    if sizes_str:
+                        size_tokens = ' '.join([f'size_{s.strip().upper()}' for s in sizes_str.split(',') if s.strip()])
+                        if size_tokens:
+                            description += f" available_sizes_token: {size_tokens}"
+
                     if description and description != ".":
                         self.product_descriptions.append(description)
                         self.product_ids_list.append(str(row['id']))
@@ -177,6 +185,15 @@ class ProductService:
                     if attr in self.products_df.columns:
                         unique_values = self.products_df[attr].dropna().astype(str).str.strip().unique()
                         self.valid_attribute_values[attr] = sorted([val for val in unique_values if val])
+                
+                # Extract and store unique sizes from the 'available_sizes' column
+                if 'available_sizes' in self.products_df.columns:
+                    all_sizes = set()
+                    for sizes_str in self.products_df['available_sizes'].dropna().astype(str):
+                        all_sizes.update([size.strip().upper() for size in sizes_str.split(',') if size.strip()])
+                    if all_sizes:
+                        self.valid_attribute_values['size'] = sorted(list(all_sizes))
+
                 print(f"Loaded valid attribute values: {json.dumps(self.valid_attribute_values, indent=2)}")
 
 
@@ -315,21 +332,34 @@ class ProductService:
         """Generate a unique session ID"""
         return f"session_{uuid.uuid4().hex[:12]}"
 
-    def _assess_shopping_intent(self, user_input: str, previous_vibe: str = None) -> dict:
+    def _assess_shopping_intent(self, user_input: str, previous_vibe: str = None, last_question_text: str = None) -> dict:
         if not user_input:
             print("Empty input for shopping intent assessment. Defaulting to has_shopping_intent: False.")
             return {"has_shopping_intent": False, "suggested_reply_if_no_intent": "Hello! How can I help you find some apparel today?", "is_related_query": False}
 
         relatedness_section = ""
         if previous_vibe:
+            last_question_context = ""
+            if last_question_text:
+                last_question_context = f"""
+        The user was just asked: "{last_question_text}"
+        Their new input should be interpreted primarily as an answer to this question. It is therefore highly likely to be RELATED.
+        Only classify as DIFFERENT if the input clearly ignores the question and introduces a new topic.
+        Example: If asked for a budget and the user says '$100', it is RELATED. If they say 'show me jackets instead', it is DIFFERENT.
+        """
+
             relatedness_section = f"""
         
         ADDITIONAL TASK: Assess if this new query is related to the previous shopping context or completely different.
         Previous vibe/context: "{previous_vibe}"
-        
+        {last_question_context}
         Determine if these are related or completely different:
-        - RELATED: same category with refinements (e.g., "summer dresses" → "show full sleeves only")
-        - DIFFERENT: completely different category/context (e.g., "summer dresses" → "work tops that go with pants")
+        - RELATED: The new query refines the previous one. This includes adding a new attribute (like fabric, color, fit), changing an attribute (like size), or asking for a variation of the same items. Examples:
+          - "summer dresses" -> "show full sleeves only" (refining sleeve length)
+          - "skirts with elevated look" -> "i need something velvet" (adding fabric attribute)
+          - "party tops" -> "what about in blue?" (adding color attribute)
+        - DIFFERENT: The new query asks for a completely different type of item or context. Example:
+          - "summer dresses" -> "work tops that go with pants" (different category and occasion)
         
         Include "is_related_query": boolean in your JSON response.
         """
@@ -368,6 +398,9 @@ class ProductService:
         {{"has_shopping_intent": false, "suggested_reply_if_no_intent": "Hello! What kind of vibe are you looking for today?", "is_related_query": null}}
 
         Example with previous context - Previous: "summer dresses", New: "show full sleeves only":
+        {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": true}}
+
+        Example with previous context - Previous: "skirts with elevated look", New: "i need something velvet":
         {{"has_shopping_intent": true, "suggested_reply_if_no_intent": null, "is_related_query": true}}
 
         Example with previous context - Previous: "summer dresses", New: "work tops that go with pants":
@@ -445,7 +478,9 @@ class ProductService:
 
         For negations (e.g., "no black", "not sleeveless", "without patterns"):
         - Create an `excluded_attributes` object. Keys are attribute names (e.g., 'color_or_print'), and values are arrays of strings to exclude.
-        - For these exclusions, try to use values from the `VALID ATTRIBUTE VALUES` list. For example, for "no patterns", you might infer `{"color_or_print": ["Floral", "Striped", "Geometric"]}`.
+        - For these exclusions, try to use values from the `VALID ATTRIBUTE VALUES` list. For example, for "no patterns", you might infer '{{"color_or_print": ["Floral print", "Charcoal pinstripe", "Emerald green grid check"]}}'.
+        - For "not sleeveless", you should exclude related values like "Sleeveless", "Strapless", "Tube", and "Spaghetti straps".
+        - For negations of lengths like "not short", exclude related values from the 'length' attribute like "Short" and "Mini".
         
         For price:
         - If the vibe mentions a maximum (e.g., 'under $100', 'less than $100'), use 'price_max'.
@@ -506,7 +541,10 @@ class ProductService:
         {{"attributes": {{"fabric": ["Lamé", "Sequined mesh"], "occasion": ["Party"]}}, "excluded_attributes": {{}}, "attribute_types": {{"fabric": "explicit", "occasion": "explicit"}}}}
 
         Vibe: "tops but not sleeveless"
-        {{"attributes": {{"category": ["top"]}}, "excluded_attributes": {{"sleeve_length": ["Sleeveless"]}}, "attribute_types": {{"category": "implicit", "sleeve_length": "explicit"}}}}
+        {{"attributes": {{"category": ["top"]}}, "excluded_attributes": {{"sleeve_length": ["Sleeveless", "Strapless", "Tube", "Spaghetti straps"]}}, "attribute_types": {{"category": "explicit", "sleeve_length": "explicit"}}}}
+
+        Vibe: "skirts but not short"
+        {{"attributes": {{"category": ["skirt"]}}, "excluded_attributes": {{"length": ["Short", "Mini"]}}, "attribute_types": {{"category": "explicit", "length": "explicit"}}}}
         
         If no attributes can be confidently inferred, output: {{"attributes": {{}}, "excluded_attributes": {{}}, "attribute_types": {{}}}}.
         JSON:
@@ -563,8 +601,9 @@ class ProductService:
             return {}
 
 
-    def _build_chroma_where_clause(self, filters: dict) -> dict | None:
+    def _build_chroma_query_clauses(self, filters: dict) -> dict:
         where_conditions = []
+        where_document_conditions = []
         processed_keys = set()
 
         if "price_min" in filters and "price_max" in filters and filters["price_min"] is not None and filters["price_max"] is not None:
@@ -575,7 +614,7 @@ class ProductService:
             where_conditions.append({"price": {"$lte": float(filters["price_max"])}})
         processed_keys.update(["price_min", "price_max", "budget", "vibe_inferred", "attribute_types", "excluded_attributes"])
 
-        # Handle size filter
+        # Handle size filter in where_document
         user_sizes_str = filters.get("size")
         if user_sizes_str:
             user_s_list = []
@@ -585,10 +624,12 @@ class ProductService:
                 user_s_list = [s.strip().upper() for s in user_sizes_str.split(',')]
             
             if user_s_list:
-                # Check if any of the user-specified sizes are present in the product's available_sizes list
-                size_or_clauses = [{"available_sizes": {"$contains": size}} for size in user_s_list]
-                if size_or_clauses:
-                    where_conditions.append({"$or": size_or_clauses})
+                # Build an $or condition for where_document to match any of the sizes
+                size_or_clauses = [{"$contains": f"size_{size}"} for size in user_s_list]
+                if len(size_or_clauses) > 1:
+                    where_document_conditions.append({"$or": size_or_clauses})
+                elif len(size_or_clauses) == 1:
+                    where_document_conditions.append(size_or_clauses[0])
         
         processed_keys.add("size")
 
@@ -610,12 +651,22 @@ class ProductService:
                     where_conditions.append({"$or": or_clauses})
             else:
                 where_conditions.append({key: {"$eq": str(value) if not isinstance(value, (int, float, bool)) else value}})
+
+        where_clause = None
+        if where_conditions:
+            if len(where_conditions) == 1:
+                where_clause = where_conditions[0]
+            else:
+                where_clause = {"$and": where_conditions}
+
+        where_document_clause = None
+        if where_document_conditions:
+            if len(where_document_conditions) == 1:
+                where_document_clause = where_document_conditions[0]
+            else:
+                where_document_clause = {"$and": where_document_conditions}
         
-        if not where_conditions:
-            return None
-        if len(where_conditions) == 1:
-            return where_conditions[0]
-        return {"$and": where_conditions}
+        return {"where": where_clause, "where_document": where_document_clause}
 
     def _refine_query_based_on_vibe(self, vibe_description: str) -> str:
         prompt_parts = [
@@ -687,7 +738,7 @@ class ProductService:
                     "neckline": str(product_data.get('neckline', '')),
                     "length": str(product_data.get('length', '')),
                     "pant_type": str(product_data.get('pant_type', '')),
-                    "available_sizes": [s.strip().upper() for s in str(product_data.get('available_sizes', '')).split(',') if s.strip()],
+                    "available_sizes": str(product_data.get('available_sizes', '')),
                     "description": str(product_data.get('description', ''))
                 }
                 metadatas.append(meta)
@@ -766,30 +817,28 @@ class ProductService:
         --- RECOMMENDED PRODUCTS END ---
         - Questions already asked (by their ID): {questions_asked_history}
 
-        TASK 1: GENERATE RESPONSE TEXT
+        TASK 1: GENERATE JUSTIFICATION TEXT
         Provide a VERY brief, concise justification (1-2 sentences maximum) explaining why these products match the user's vibe and preferences.
         If no products were found, use this text: "{no_product_justification}"
-        Otherwise, be conversational and direct. Keep it under 30 words.
+        Otherwise, be conversational and direct. Keep it under 30 words. DO NOT include any follow-up question in this text.
         {relaxation_instruction}
-        
-        {follow_up_task_instructions}
 
-        If a follow-up question is generated, combine it with the justification into a single conversational paragraph. The justification should flow smoothly into the question.
+        {follow_up_task_instructions}
 
         OUTPUT:
         Output your decision ONLY as a JSON object with these keys:
-        - "response_text": string (The combined justification and follow-up question text. If no follow up, this is just the justification.)
-        - "next_question_text": string (The question part of the text. If no question is needed, this MUST be null.)
+        - "justification_text": string (The justification text ONLY. If no follow up, this is the full response.)
+        - "next_question_text": string (The follow-up question. If no question is needed, this MUST be null.)
 
         EXAMPLE OUTPUT (with question):
         {{
-            "response_text": "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top. To refine this further, do you have a budget or specific size in mind?",
+            "justification_text": "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top.",
             "next_question_text": "To refine this further, do you have a budget or specific size in mind?"
         }}
         
         EXAMPLE OUTPUT (no question needed):
         {{
-            "response_text": "Based on your preferences, here are some options that match your 'edgy streetwear' vibe.",
+            "justification_text": "Based on your preferences, here are some options that match your 'edgy streetwear' vibe.",
             "next_question_text": null
         }}
 
@@ -797,7 +846,7 @@ class ProductService:
         """
 
         default_response = {
-            "response_text": "We found some great products for you! Their styles and features should match your vibe." if products else no_product_justification,
+            "justification_text": "We found some great products for you! Their styles and features should match your vibe." if products else no_product_justification,
             "next_question_text": None
         }
 
@@ -808,12 +857,12 @@ class ProductService:
             # Validate response, provide defaults if keys are missing
             if isinstance(llm_response, dict):
                 # Make sure the justification for no products is correct.
-                justification = llm_response.get("response_text", default_response["response_text"])
+                justification = llm_response.get("justification_text", default_response["justification_text"])
                 if not products:
                     justification = no_product_justification
 
                 return {
-                    "response_text": justification,
+                    "justification_text": justification,
                     "next_question_text": llm_response.get("next_question_text")
                 }
             return default_response
@@ -836,7 +885,6 @@ class ProductService:
         final_response = {
             "session_id": session_id,
             "follow_up_question": None,
-            "question_text_for_client": None,
             "current_filters": dict(current_filters),
             "questions_asked_history": list(questions_asked_history),
             "products": None,
@@ -852,7 +900,7 @@ class ProductService:
             print(f"📜 PREVIOUS: '{previous_vibe}'")
             print(f"💬 CURRENT: '{user_response}'")
             
-            intent_assessment = self._assess_shopping_intent(user_response, previous_vibe)
+            intent_assessment = self._assess_shopping_intent(user_response, previous_vibe, last_question_text)
             print(f"DEVLOG: Follow-up LLM assessment result: {intent_assessment}")
             has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
             suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
@@ -893,7 +941,7 @@ class ProductService:
             # Get previous vibe for relatedness assessment
             print(f"📜 PREVIOUS: '{previous_vibe}'")
             print(f"💬 CURRENT: '{input_to_assess}'")
-            intent_assessment = self._assess_shopping_intent(input_to_assess, previous_vibe)
+            intent_assessment = self._assess_shopping_intent(input_to_assess, previous_vibe, last_question_text)
             print(f"DEVLOG: LLM intent assessment result: {intent_assessment}")
             has_shopping_intent = intent_assessment.get("has_shopping_intent", True)
             suggested_reply_if_no_intent = intent_assessment.get("suggested_reply_if_no_intent")
@@ -1016,10 +1064,11 @@ class ProductService:
 
         print(f"Proceeding to search with filters: {current_filters}")
         refined_semantic_query = self._refine_query_based_on_vibe(vibe)
-        chroma_where_clause = self._build_chroma_where_clause(current_filters)
+        query_clauses = self._build_chroma_query_clauses(current_filters)
         
         print(f"DEVLOG: ChromaDB refined_semantic_query: {refined_semantic_query}")
-        print(f"DEVLOG: ChromaDB where_clause: {json.dumps(chroma_where_clause, indent=2)}")
+        print(f"DEVLOG: ChromaDB where_clause: {json.dumps(query_clauses.get('where'), indent=2)}")
+        print(f"DEVLOG: ChromaDB where_document_clause: {json.dumps(query_clauses.get('where_document'), indent=2)}")
         
         top_k_target = 8
         top_k_initial_fetch = top_k_target * 4 
@@ -1036,7 +1085,8 @@ class ProductService:
                 chroma_query_results = self.collection.query(
                     query_embeddings=query_embedding_list,
                     n_results=top_k_initial_fetch,
-                    where=chroma_where_clause if chroma_where_clause else None,
+                    where=query_clauses.get("where"),
+                    where_document=query_clauses.get("where_document"),
                     include=['metadatas', 'documents', 'distances']
                 )
                 candidate_products = []
@@ -1078,7 +1128,7 @@ class ProductService:
                 implicit_relaxation_order = ['neckline', 'sleeve_length', 'length', 'fabric', 'color_or_print', 'occasion', 'fit']
                 
                 # Always keep explicit attributes and essential filters
-                always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'exclude_colors', 'vibe_inferred']
+                always_keep = ['category', 'size', 'price_min', 'price_max', 'budget', 'excluded_attributes', 'vibe_inferred']
                 
                 # Start with current filters and progressively remove implicit attributes
                 temp_relaxed_filters = {k: v for k, v in current_filters.items() if k != "attribute_types"}
@@ -1109,13 +1159,14 @@ class ProductService:
                         enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
                         enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
                         
-                        chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
+                        relaxed_clauses = self._build_chroma_query_clauses(temp_relaxed_filters)
                         
                         try:
                             chroma_query_results_relaxed = self.collection.query(
                                 query_embeddings=enhanced_query_embedding_list,
                                 n_results=top_k_initial_fetch,
-                                where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
+                                where=relaxed_clauses.get("where"),
+                                where_document=relaxed_clauses.get("where_document"),
                                 include=['metadatas', 'documents', 'distances']
                             )
                             
@@ -1134,7 +1185,7 @@ class ProductService:
                             # Python-based filtering is no longer needed
                             final_products_after_relaxed_py_filter = candidate_products_relaxed
                             
-                            if len(final_products_after_relaxed_py_filter) >= 3:
+                            if len(final_products_after_relaxed_py_filter) >= top_k_target:
                                 print(f"RELAXATION SUCCESS: Found {len(final_products_after_relaxed_py_filter)} products after dropping '{attribute_to_drop}'")
                                 # Merge results and break
                                 first_pass_products = final_response["products"]
@@ -1187,13 +1238,14 @@ class ProductService:
                             enhanced_query_embedding = self.embedding_model.encode([enhanced_query])
                             enhanced_query_embedding_list = [enhanced_query_embedding[0].tolist()]
                             
-                            chroma_where_clause_relaxed = self._build_chroma_where_clause(temp_relaxed_filters)
+                            relaxed_clauses = self._build_chroma_query_clauses(temp_relaxed_filters)
                             
                             try:
                                 chroma_query_results_relaxed = self.collection.query(
                                     query_embeddings=enhanced_query_embedding_list,
                                     n_results=top_k_initial_fetch,
-                                    where=chroma_where_clause_relaxed if chroma_where_clause_relaxed else None,
+                                    where=relaxed_clauses.get("where"),
+                                    where_document=relaxed_clauses.get("where_document"),
                                     include=['metadatas', 'documents', 'distances']
                                 )
                                 
@@ -1236,15 +1288,20 @@ class ProductService:
                 search_relaxed=search_was_relaxed
             )
 
-            justification_text = justification_and_followup.get("response_text")
+            justification_text = justification_and_followup.get("justification_text")
             next_q_text = justification_and_followup.get("next_question_text")
             
-            final_response["justification"] = justification_text
+            combined_text = justification_text
+            if next_q_text and justification_text:
+                combined_text = f"{justification_text} {next_q_text}"
+            elif next_q_text:
+                combined_text = next_q_text
+            
+            final_response["justification"] = combined_text
             
             if next_q_text:
                 # Still populate follow_up_question fields for conversation state tracking
                 final_response["follow_up_question"] = next_q_text
-                final_response["question_text_for_client"] = next_q_text
                 final_response["questions_asked_history"] = questions_asked_history + [next_q_text]
                 print(f"Suggesting follow-up: '{next_q_text}' alongside results.")
             else:
