@@ -56,7 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         let htmlContent = '';
         if (justification) {
-            htmlContent += `<strong>Justification:</strong><p>${escapeHtml(justification).replace(/\n/g, '<br>')}</p>`;
+            htmlContent += `<p>${escapeHtml(justification).replace(/\n/g, '<br>')}</p>`;
         }
 
         if (products && products.length > 0) {
@@ -71,13 +71,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 </li>`;
             });
             htmlContent += '</ul>';
-        } else if (!justification) {
-            htmlContent += '<p>No products found matching your criteria.</p>';
         }
         
-        messageDiv.innerHTML = htmlContent;
-        chatLog.appendChild(messageDiv);
-        chatLog.scrollTop = chatLog.scrollHeight;
+        // Only append if there's actually content
+        if (htmlContent) {
+            messageDiv.innerHTML = htmlContent;
+            chatLog.appendChild(messageDiv);
+            chatLog.scrollTop = chatLog.scrollHeight;
+        }
     }
 
     function escapeHtml(unsafe) {
@@ -140,22 +141,14 @@ document.addEventListener('DOMContentLoaded', () => {
             
             lastQuestionText = data.follow_up_question;
 
-            if (data.follow_up_question) {
-                appendMessage(data.follow_up_question, 'agent');
+            if (data.products || data.justification) {
+                displayProducts(data.products, data.justification);
             }
 
-            if (data.products || (data.justification && !data.follow_up_question)) {
-                displayProducts(data.products, data.justification);
-                if (!data.follow_up_question) {
-                     userInput.disabled = true;
-                     sendButton.disabled = true;
-                     userInput.placeholder = "Conversation ended.";
-                }
-            } else if (data.justification && !data.follow_up_question && !data.products) {
-                appendMessage(data.justification, 'agent');
-                userInput.disabled = true;
-                sendButton.disabled = true;
-                userInput.placeholder = "Conversation ended.";
+            if (!data.follow_up_question) {
+                 userInput.disabled = true;
+                 sendButton.disabled = true;
+                 userInput.placeholder = "Conversation ended. Start a new chat.";
             }
 
 

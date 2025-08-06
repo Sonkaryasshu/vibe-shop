@@ -228,6 +228,7 @@ class ProductService:
                     ]
                     response = self.anthropic_client.messages.create(
                         model=self.claude_model,
+                        temperature=0,
                         max_tokens=5000,
                         messages=messages
                     )
@@ -241,6 +242,7 @@ class ProductService:
                     ]
                     response = self.anthropic_client.messages.create(
                         model=self.claude_model,
+                        temperature=0,
                         max_tokens=5000,
                         messages=messages
                     )
@@ -545,125 +547,6 @@ class ProductService:
             print(f"Error inferring attributes from vibe: {e}")
             return {}
 
-    def _parse_user_answer_and_update_filters(self, last_question_text: str, user_answer: str, current_filters: dict) -> dict:
-
-        filters_for_prompt = {k: v for k, v in current_filters.items() if k != "vibe_inferred"}
-
-        prompt = f"""
-        You are a helpful assistant processing a user's preferences for apparel.
-        Current known preferences: {json.dumps(filters_for_prompt)}
-        Valid attribute values: {json.dumps(self.valid_attribute_values)}
-        The user was asked: "{last_question_text}"
-        The user replied: "{user_answer}"
-
-        Based on the user's reply, identify what attributes from the preferences should be updated, added, or removed.
-        
-        IMPORTANT: Extract ANY relevant attribute information from the user's response, even if it doesn't directly answer the original question. 
-        For example, if asked about "fit" but user mentions "size", extract the size information.
-        
-        Output ONLY a JSON object containing these changes.
-        - To add or update an attribute, include its new value (e.g., {{"price_max": 50}}, {{"size": ["S"]}}).
-        - If the user's reply indicates a preference for an attribute should be cleared or reset (e.g., they say "any size is fine" or "no budget limit"), output that attribute with a `null` value (e.g., {{"size": null}}).
-        - Include ALL attributes directly addressed or modified by the user's current reply. Do not include unchanged attributes from 'Current known preferences'.
-        - If the user's answer contains no relevant attribute information, return an empty JSON object {{}}.
-        - If the user is asking a clarifying question instead of providing preference information, return: {{"clarification_answer": "your helpful answer to their question"}}
-
-        For example:
-        - If Current preferences are {{"category": "top"}} and user was asked "Budget?" and replied "under $50", your JSON output should be: {{"price_max": 50}}
-        - If Current preferences are {{"price_max": 100}} and user was asked "Size?" and replied "S or M", your JSON output should be: {{"size": ["S", "M"]}}
-        - If Current preferences are {{"size": "S"}} and user was asked "Size?" and replied "Actually, any size works", your JSON output should be: {{"size": null}}
-        - If user was asked "What fit are you looking for?" and replied "i need small size only", your JSON output should be: {{"size": ["S"]}}
-        - If user was asked "What occasion?" and replied "casual wear, medium budget around $75", your JSON output should be: {{"occasion": "casual", "price_max": 75}}
-        - If the question was "Any must-haves like sleeveless, budget range or size to keep in mind?" and the user replied "Want sleeveless, keep under $100, both S and M work", your JSON output should be:
-          {{"sleeve_length": "sleeveless", "price_max": 100, "size": ["S", "M"]}}
-        - If user was asked "What category?" and replied "what categories do you have?", your JSON output should be: {{"clarification_answer": "I have these categories available: dress, top, pants, skirt. Which one interests you for your effortless but polished look?"}}
-        
-        Ensure attribute keys in your JSON output are standard (e.g., price_min, price_max, category, size, fit, fabric, color_or_print, occasion, sleeve_length, length, pant_type).
-        JSON:
-        """
-        try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
-            llm_suggested_changes = _parse_llm_json_output(response_text)
-            if isinstance(llm_suggested_changes, dict):
-                # Check if this is a clarification answer
-                if "clarification_answer" in llm_suggested_changes:
-                    # Return special marker for clarification
-                    return {"__clarification_answer__": llm_suggested_changes["clarification_answer"]}
-                
-                # Normal filter updates
-                if llm_suggested_changes:
-                    new_filters = current_filters.copy()
-                    for key, value in llm_suggested_changes.items():
-                        if value is None:
-                            if key in new_filters:
-                                del new_filters[key]
-                        else:
-                            new_filters[key] = value
-                    return new_filters
-            return current_filters
-        except Exception as e:
-            print(f"Error parsing user answer: {e}")
-            return current_filters
-
-    def _determine_next_follow_up(self, vibe_description: str, current_filters: dict, questions_asked_history: list) -> tuple[str | None, str | None, str | None]:
-        
-        if len(questions_asked_history) >= self.MAX_FOLLOW_UP_QUESTIONS:
-            print(f"Max follow-up questions ({self.MAX_FOLLOW_UP_QUESTIONS}) reached or exceeded. Not asking another.")
-            return None, None, None
-
-        filters_for_prompt = {k: v for k, v in current_filters.items() if k != "vibe_inferred"}
-
-        prompt = f"""
-        You are a conversational shopping assistant. Product recommendations may have just been shown or are about to be shown based on current information.
-        User's initial vibe: "{vibe_description}"
-        Current known user preferences: {json.dumps(filters_for_prompt)}
-        Questions already asked (by their ID): {questions_asked_history}
-        Number of follow-up questions asked so far: {len(questions_asked_history)}. Max {self.MAX_FOLLOW_UP_QUESTIONS} follow-ups in total.
-
-        Your task: If there are still important, unclarified attributes that would significantly improve future recommendations, formulate a single, natural-sounding question to ask the user.
-        Prioritize asking about the following key aspects if they are missing or unclear from "Current known user preferences":
-        - Category (e.g., dress, top, pants)
-        - Size
-        - Budget (price range, e.g., under $100, $50-$150)
-        - Fit (e.g., relaxed, tailored)
-        - Occasion (e.g., work, casual, party)
-        - Other specific style details (e.g., Sleeve Length, Garment Length, Color/Print, Fabric type).
-        This question will be shown alongside the current product recommendations to help refine the next search.
-
-        IMPORTANT:
-        1.  Examine "Current known user preferences" and "Questions already asked" VERY CAREFULLY.
-            Do NOT ask about attributes already sufficiently covered or recently asked.
-        2.  If current preferences seem reasonably complete for good recommendations OR if all {self.MAX_FOLLOW_UP_QUESTIONS} follow-up questions have been asked,
-            indicate that no further question is needed by returning nulls.
-        3.  The question should ideally target 1-2 key missing pieces of information.
-            Example: If budget and size are still vague: "To refine this further, do you have a budget or specific size in mind?"
-            Example: If specific style details are missing: "Any other preferences, perhaps for sleeve length or fit, to narrow it down more?"
-
-        Output your decision ONLY as a JSON object with three keys: "next_question_text", "next_question_id", "attribute_key".
-        - "next_question_text": The question to ask. If no question is needed, this should be null.
-        - "next_question_id": A concise ID for the question (e.g., "ask_size_budget", "ask_style_details"). If no question, null.
-        - "attribute_key": The primary filter key(s) this question relates to (e.g., "size,price_max", "sleeve_length,fit", "category"). If no question, null.
-        
-        Example JSON if asking a question: {{"next_question_text": "Great. Any must-haves like size or a budget to keep in mind?", "next_question_id": "ask_size_budget", "attribute_key": "size,price_max"}}
-        Example JSON if no question needed: {{"next_question_text": null, "next_question_id": null, "attribute_key": null}}
-        JSON:
-        """
-        try:
-            response_text = self._call_llm(prompt, response_format="json", thinking_budget=0)
-            decision = _parse_llm_json_output(response_text)
-            
-            if decision.get("next_question_text") is None:
-                return None, None, None
-            
-            if decision.get("next_question_id") and decision.get("attribute_key"):
-                 return decision.get("next_question_text"), decision.get("next_question_id"), decision.get("attribute_key")
-            else:
-                print("LLM suggested a question but was missing id or attribute_key. Treating as no question.")
-                return None, None, None
-
-        except Exception as e:
-            print(f"Error determining next follow-up: {e}")
-            return None, None, None
 
     def _build_chroma_where_clause(self, filters: dict) -> dict | None:
         where_conditions = []
@@ -836,32 +719,30 @@ class ProductService:
         except Exception as e:
             print(f"Error building ChromaDB vector store: {e}")
 
-    def _generate_justification(self, vibe_description: str, products: list, current_filters: dict, search_relaxed: bool = False) -> str:
-
-        if not products:
-            if search_relaxed:
-                return "We relaxed filters to find more options, but no products matched. Try a different style or adjust preferences."
-            return "No products found to justify based on the current criteria."
+    def _generate_justification_and_followup(self, vibe_description: str, products: list, current_filters: dict, questions_asked_history: list, search_relaxed: bool = False) -> dict:
+        
+        filters_for_prompt = {k: v for k, v in current_filters.items() if k not in ["vibe_inferred", "attribute_types"]}
 
         product_details_list = []
-        for i, p_dict in enumerate(products):
-            name = p_dict.get('name', 'N/A')
-            category = p_dict.get('category', 'N/A')
-            fit = p_dict.get('fit', '')
-            fabric = p_dict.get('fabric', '')
-            color_or_print = p_dict.get('color_or_print', '')
-            
-            summary = f"Product {i+1}: {name} ({category}). "
-            features = [f for f in [fit, fabric, color_or_print] if f]
-            if features:
-                summary += f"Key features: {', '.join(features)}."
-            product_details_list.append(summary.strip())
+        if products:
+            for i, p_dict in enumerate(products):
+                name = p_dict.get('name', 'N/A')
+                category = p_dict.get('category', 'N/A')
+                fit = p_dict.get('fit', '')
+                fabric = p_dict.get('fabric', '')
+                color_or_print = p_dict.get('color_or_print', '')
+                
+                summary = f"Product {i+1}: {name} ({category}). "
+                features = [f for f in [fit, fabric, color_or_print] if f]
+                if features:
+                    summary += f"Key features: {', '.join(features)}."
+                product_details_list.append(summary.strip())
         
-        product_details_string = "\n".join(product_details_list)
+        product_details_string = "\n".join(product_details_list) if product_details_list else "No products found."
 
         filter_summary_parts = []
-        for key, value in current_filters.items():
-            if not value or key in ["budget"]:
+        for key, value in filters_for_prompt.items():
+            if not value:
                 continue
             if key == "price_max" and value is not None: filter_summary_parts.append(f"under ${value}")
             elif key == "price_min" and value is not None: filter_summary_parts.append(f"over ${value}")
@@ -872,31 +753,88 @@ class ProductService:
 
         relaxation_instruction = ""
         if search_relaxed:
-            relaxation_instruction = "\n\nIMPORTANT: Start your justification by mentioning that filters were relaxed to find these options (e.g., 'We relaxed your search to find...' or 'After broadening criteria...')."
+            relaxation_instruction = "\n\nIMPORTANT: The search was relaxed to find these options. Start your justification by mentioning this (e.g., 'We relaxed your search to find...' or 'After broadening criteria...')."
 
-        prompt = f"""The user expressed a desire for products matching the vibe: "{vibe_description}".
-Additionally, they specified the following preferences: {filter_summary if filter_summary else "no specific additional preferences"}.
+        no_product_justification = "No products found matching your criteria."
+        if search_relaxed:
+            no_product_justification = "We relaxed filters to find more options, but no products matched. Try a different style or adjust preferences."
+        
+        max_follow_ups_reached = len(questions_asked_history) >= self.MAX_FOLLOW_UP_QUESTIONS
+        follow_up_task_instructions = f"""
+        TASK 2: DETERMINE NEXT FOLLOW-UP QUESTION
+        If there are still important, unclarified attributes that would significantly improve future recommendations, formulate a single, natural-sounding question to ask the user.
+        Prioritize asking about: Category, Size, Budget, Fit, Occasion, or other specific style details.
+        Do NOT ask about attributes already sufficiently covered in '{json.dumps(filters_for_prompt)}' or recently asked in '{questions_asked_history}'.
+        If preferences are complete or max follow-ups ({self.MAX_FOLLOW_UP_QUESTIONS}) reached, no question is needed.
+        """
+        if max_follow_ups_reached:
+            follow_up_task_instructions = "TASK 2: DO NOT ASK A FOLLOW-UP QUESTION. Maximum number of follow-ups has been reached."
 
-Based on this, we have recommended the following products:
---- RECOMMENDED PRODUCTS START ---
-{product_details_string}
---- RECOMMENDED PRODUCTS END ---
+        prompt = f"""You are a conversational shopping assistant. Your task is to generate a justification for recommended products and determine the next follow-up question.
 
-Please provide a VERY brief, concise justification (1-2 sentences maximum) explaining why these products match their vibe.
-Focus on the key attributes that align with the vibe. Be conversational and direct.
+        CONTEXT:
+        - User's initial vibe: "{vibe_description}"
+        - Current known user preferences: {filter_summary if filter_summary else "no specific additional preferences"}
+        - Recommended products:
+        --- RECOMMENDED PRODUCTS START ---
+        {product_details_string}
+        --- RECOMMENDED PRODUCTS END ---
+        - Questions already asked (by their ID): {questions_asked_history}
 
-Example format: "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top."
+        TASK 1: GENERATE RESPONSE TEXT
+        Provide a VERY brief, concise justification (1-2 sentences maximum) explaining why these products match the user's vibe and preferences.
+        If no products were found, use this text: "{no_product_justification}"
+        Otherwise, be conversational and direct. Keep it under 30 words.
+        {relaxation_instruction}
+        
+        {follow_up_task_instructions}
 
-IMPORTANT: Keep it under 30 words. Be specific about how the products match the vibe, not generic descriptions.{relaxation_instruction}
+        If a follow-up question is generated, combine it with the justification into a single conversational paragraph. The justification should flow smoothly into the question.
 
-Justification:
-"""
+        OUTPUT:
+        Output your decision ONLY as a JSON object with these keys:
+        - "response_text": string (The combined justification and follow-up question text. If no follow up, this is just the justification.)
+        - "next_question_text": string (The question part of the text. If no question is needed, this MUST be null.)
+
+        EXAMPLE OUTPUT (with question):
+        {{
+            "response_text": "These picks capture 'effortless' through relaxed fabrics and 'polished' with refined tones and tailored cuts—like the structured Mustard Muse top. To refine this further, do you have a budget or specific size in mind?",
+            "next_question_text": "To refine this further, do you have a budget or specific size in mind?"
+        }}
+        
+        EXAMPLE OUTPUT (no question needed):
+        {{
+            "response_text": "Based on your preferences, here are some options that match your 'edgy streetwear' vibe.",
+            "next_question_text": null
+        }}
+
+        JSON:
+        """
+
+        default_response = {
+            "response_text": "We found some great products for you! Their styles and features should match your vibe." if products else no_product_justification,
+            "next_question_text": None
+        }
+
         try:
-            response_text = self._call_llm(prompt, response_format="text", thinking_budget=512)
-            return response_text.strip() if response_text else "We found some great products for you! Their styles and features should match your vibe."
+            response_text = self._call_llm(prompt, response_format="json", thinking_budget=512)
+            llm_response = _parse_llm_json_output(response_text)
+            
+            # Validate response, provide defaults if keys are missing
+            if isinstance(llm_response, dict):
+                # Make sure the justification for no products is correct.
+                justification = llm_response.get("response_text", default_response["response_text"])
+                if not products:
+                    justification = no_product_justification
+
+                return {
+                    "response_text": justification,
+                    "next_question_text": llm_response.get("next_question_text")
+                }
+            return default_response
         except Exception as e:
-            print(f"Error generating justification: {e}")
-            return "We found some great products for you! Their styles and features should match your vibe."
+            print(f"Error generating justification and next question: {e}")
+            return default_response
 
     def converse(self, session_payload: dict) -> dict:
         session_id = session_payload.get("session_id") or self._generate_session_id()
@@ -913,7 +851,6 @@ Justification:
         final_response = {
             "session_id": session_id,
             "follow_up_question": None,
-            "question_id": None,
             "question_text_for_client": None,
             "current_filters": dict(current_filters),
             "questions_asked_history": list(questions_asked_history),
@@ -1021,7 +958,7 @@ Justification:
                     combined_vibe = original_vibe
                     print(f"Input identical to original vibe, using: '{combined_vibe}'")
                 else:
-                    combined_vibe = f"{original_vibe} {input_to_assess}".strip()
+                    combined_vibe = f"{original_vibe} \n\n\n {input_to_assess}".strip()
                     print(f"Combined vibe: '{original_vibe}' + '{input_to_assess}' = '{combined_vibe}'")
                 vibe = combined_vibe
                 
@@ -1100,9 +1037,7 @@ Justification:
         print(f"DEVLOG: ChromaDB where_clause: {json.dumps(chroma_where_clause, indent=2)}")
         
         top_k_target = 8
-        top_k_initial_fetch = top_k_target 
-        if "size" in current_filters and current_filters["size"]:
-            top_k_initial_fetch = top_k_target * 4
+        top_k_initial_fetch = top_k_target * 4 
 
         search_was_relaxed = False
 
@@ -1147,7 +1082,7 @@ Justification:
                 final_response["products"] = []
 
             # New Relaxation Strategy: Ordered Implicit Attribute Removal
-            if len(final_response["products"]) < 3:
+            if len(final_response["products"]) < top_k_target:
                 print(f"Initial search yielded {len(final_response['products'])} products. Starting ordered relaxation strategy.")
                 
                 # Get attribute types from filters
@@ -1220,7 +1155,7 @@ Justification:
                                 
                                 merged_products = first_pass_products.copy()
                                 relaxed_added = 0
-                                max_relaxed_to_add = min(5, 8 - len(first_pass_products))
+                                max_relaxed_to_add = top_k_target - len(first_pass_products)
                                 
                                 for product in final_products_after_relaxed_py_filter:
                                     if product.get("id") not in first_pass_ids and relaxed_added < max_relaxed_to_add:
@@ -1304,23 +1239,29 @@ Justification:
                 if len(final_response["products"]) == 0:
                     search_was_relaxed = True
             
-            if not final_response["products"]:
-                justification_text = self._generate_justification(vibe, [], current_filters, search_relaxed=search_was_relaxed)
-                final_response["justification"] = justification_text
-            else:
-                final_response["justification"] = self._generate_justification(vibe, final_response["products"], current_filters, search_relaxed=search_was_relaxed)
+            # Generate justification and determine next follow-up in a single LLM call
+            justification_and_followup = self._generate_justification_and_followup(
+                vibe,
+                final_response["products"] or [],
+                current_filters,
+                questions_asked_history,
+                search_relaxed=search_was_relaxed
+            )
 
-        next_q_text, next_q_id, next_q_attr_key = self._determine_next_follow_up(vibe, current_filters, questions_asked_history)
-        
-        if next_q_text and next_q_id:
-            final_response["follow_up_question"] = next_q_text
-            final_response["question_id"] = next_q_id
-            final_response["question_text_for_client"] = next_q_text
-            final_response["questions_asked_history"] = questions_asked_history + [next_q_id]
-            print(f"Suggesting follow-up: '{next_q_text}' (ID: {next_q_id}) alongside results.")
-        else:
-            print("No further follow-up question suggested or limit reached.")
-            final_response["questions_asked_history"] = list(questions_asked_history)
+            justification_text = justification_and_followup.get("response_text")
+            next_q_text = justification_and_followup.get("next_question_text")
+            
+            final_response["justification"] = justification_text
+            
+            if next_q_text:
+                # Still populate follow_up_question fields for conversation state tracking
+                final_response["follow_up_question"] = next_q_text
+                final_response["question_text_for_client"] = next_q_text
+                final_response["questions_asked_history"] = questions_asked_history + [next_q_text]
+                print(f"Suggesting follow-up: '{next_q_text}' alongside results.")
+            else:
+                print("No further follow-up question suggested or limit reached.")
+                final_response["questions_asked_history"] = list(questions_asked_history)
 
         # Update session storage with the final vibe used
         self._update_session_data(session_id, vibe, input_to_assess)
